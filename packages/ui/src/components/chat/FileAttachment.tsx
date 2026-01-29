@@ -6,6 +6,7 @@ import { toast } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { useIsVSCodeRuntime } from '@/hooks/useRuntimeAPIs';
+
 import type { ToolPopupContent } from './message/types';
 
 export const FileAttachmentButton = memo(() => {
@@ -158,30 +159,29 @@ const FileChip = memo(({ file, onRemove }: FileChipProps) => {
   const displayName = extractFilename(file.filename);
 
   return (
-    <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-muted/30 border border-border/30 rounded-xl typography-meta">
-      {}
+    <div className="flex w-full sm:inline-flex sm:w-auto items-center gap-1.5 px-3 sm:px-2.5 py-1 bg-muted/30 border border-border/30 rounded-xl typography-meta max-w-full min-w-0">
       <div title={file.source === 'server' ? "Server file" : "Local file"}>
         {file.source === 'server' ? (
-          <RiHardDrive3Line className="h-3 w-3 text-primary" />
+          <RiHardDrive3Line className="h-3 w-3 text-primary flex-shrink-0" />
         ) : (
-          <RiComputerLine className="h-3 w-3 text-muted-foreground" />
+          <RiComputerLine className="h-3 w-3 text-muted-foreground flex-shrink-0" />
         )}
       </div>
       {getFileIcon()}
-      <div className="overflow-hidden max-w-[200px]">
-        <span className="marquee-text" title={file.serverPath || displayName}>
+      <div className="overflow-hidden max-w-[120px] sm:max-w-[180px] flex-1 min-w-0">
+        <span className="truncate block" title={file.serverPath || displayName}>
           {displayName}
         </span>
       </div>
-      <span className="text-muted-foreground flex-shrink-0">
-        ({formatFileSize(file.size)})
+      <span className="ml-auto text-muted-foreground flex-shrink-0 text-xs">
+        {formatFileSize(file.size)}
       </span>
       <button
         onClick={onRemove}
-        className="ml-1 hover:text-destructive p-0.5"
+        className="hover:text-destructive min-h-6 min-w-6 sm:min-h-0 sm:min-w-0 sm:p-0.5 flex items-center justify-center flex-shrink-0 rounded focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         title="Remove file"
       >
-        <RiCloseLine className="h-3 w-3" />
+        <RiCloseLine className="h-4 w-4 sm:h-3 sm:w-3" />
       </button>
     </div>
   );
@@ -193,9 +193,9 @@ export const AttachedFilesList = memo(() => {
   if (attachedFiles.length === 0) return null;
 
   return (
-    <div className="pb-2">
-      <div className="flex items-center flex-wrap gap-2 px-3 py-2 bg-muted/30 rounded-xl border border-border/30">
-        <span className="typography-meta text-muted-foreground font-medium">Attached:</span>
+    <div className="pb-2 overflow-hidden">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:flex-wrap gap-2 px-3 py-2 bg-muted/30 rounded-xl border border-border/30">
+        <span className="typography-meta text-muted-foreground font-medium flex-shrink-0">Attached:</span>
         {attachedFiles.map((file) => (
           <FileChip
             key={file.id}
@@ -292,7 +292,7 @@ export const MessageFilesDisplay = memo(({ files, onShowPopup }: MessageFilesDis
             >
               {getFileIcon(file.mime)}
               <div className="overflow-hidden max-w-[200px]">
-                <span className="marquee-text">
+                <span className="truncate block" title={extractFilename(file.filename)}>
                   {extractFilename(file.filename)}
                 </span>
               </div>

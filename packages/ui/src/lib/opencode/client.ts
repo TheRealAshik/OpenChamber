@@ -136,6 +136,7 @@ const getDesktopFilesApi = (): FilesAPI | null => {
 class OpencodeService {
   private client: OpencodeClient;
   private baseUrl: string;
+  private scopedClients: Map<string, OpencodeClient> = new Map();
   private sseAbortControllers: Map<string, AbortController> = new Map();
   private currentDirectory: string | undefined = undefined;
 
@@ -152,6 +153,26 @@ class OpencodeService {
     const requestedBaseUrl = desktopBase || baseUrl;
     this.baseUrl = ensureAbsoluteBaseUrl(requestedBaseUrl);
     this.client = createOpencodeClient({ baseUrl: this.baseUrl });
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  /**
+   * Returns an SDK client scoped to a project directory.
+   * Needed for worktree APIs where backend ignores per-call directory.
+   */
+  getScopedApiClient(directory: string): OpencodeClient {
+    const normalized = this.normalizeCandidatePath(directory) ?? directory;
+    const key = normalized || '';
+    const existing = this.scopedClients.get(key);
+    if (existing) {
+      return existing;
+    }
+    const scoped = createOpencodeClient({ baseUrl: this.baseUrl, directory: normalized });
+    this.scopedClients.set(key, scoped);
+    return scoped;
   }
 
   private normalizeCandidatePath(path?: string | null): string | null {
@@ -307,6 +328,25 @@ class OpencodeService {
 
     const [primary] = Array.from(candidates);
     return this.deriveHomeDirectory(primary);
+  }
+
+  /**
+   * Best-effort probe whether a directory is accessible to OpenCode.
+   * This is intentionally NOT the same as local filesystem access in the UI runtime.
+   */
+  async probeDirectory(directory: string): Promise<boolean> {
+    const normalized = this.normalizeCandidatePath(directory);
+    if (!normalized) {
+      return false;
+    }
+    try {
+      const response = await this.client.path.get({ directory: normalized });
+      const info = response.data as { directory?: unknown } | undefined;
+      const returned = typeof info?.directory === 'string' ? info.directory : null;
+      return Boolean(returned && returned.trim().length > 0);
+    } catch {
+      return false;
+    }
   }
 
   // Session Management
@@ -598,6 +638,7 @@ class OpencodeService {
     modelID: string;
     text: string;
     prefaceText?: string;
+    prefaceTextSynthetic?: boolean;
     agent?: string;
     variant?: string;
     files?: Array<{
@@ -609,6 +650,7 @@ class OpencodeService {
     /** Additional text/file parts to include (for batch sending queued messages) */
     additionalParts?: Array<{
       text: string;
+      synthetic?: boolean;
       files?: Array<{
         type: 'file';
         mime: string;
@@ -630,7 +672,8 @@ class OpencodeService {
     if (params.prefaceText && params.prefaceText.trim()) {
       parts.push({
         type: 'text',
-        text: params.prefaceText
+        text: params.prefaceText,
+        synthetic: params.prefaceTextSynthetic !== false,
       });
     }
 
@@ -663,7 +706,8 @@ class OpencodeService {
         if (additional.text && additional.text.trim()) {
           parts.push({
             type: 'text',
-            text: additional.text
+            text: additional.text,
+            ...(additional.synthetic ? { synthetic: true } : {}),
           });
         }
         if (additional.files && additional.files.length > 0) {
@@ -809,6 +853,38 @@ class OpencodeService {
     Record<string, { type: "idle" | "busy" | "retry"; attempt?: number; message?: string; next?: number }>
   > {
     return this.getSessionStatusForDirectory(null);
+  }
+
+  /**
+   * Get session activity from web server's in-memory tracking.
+   * This is more reliable than getGlobalSessionStatus on visibility restore
+   * because the web server tracks activity even when UI is not listening to SSE.
+   */
+  async getWebServerSessionActivity(): Promise<
+    Record<string, { type: string }> | null
+  > {
+    try {
+      // Web server endpoint - use relative path that works with both dev and prod
+      const response = await fetch('/api/session-activity', {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = await response.json().catch(() => null);
+      if (!data || typeof data !== 'object') {
+        return null;
+      }
+
+      return data as Record<string, { type: string }>;
+    } catch {
+      return null;
+    }
   }
 
   // Tools

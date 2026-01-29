@@ -1,6 +1,11 @@
 import type {
   GitHubAPI,
   GitHubAuthStatus,
+  GitHubIssueCommentsResult,
+  GitHubIssueGetResult,
+  GitHubIssuesListResult,
+  GitHubPullRequestContextResult,
+  GitHubPullRequestsListResult,
   GitHubPullRequest,
   GitHubPullRequestCreateInput,
   GitHubPullRequestMergeInput,
@@ -35,6 +40,11 @@ export const createDesktopGitHubAPI = (): GitHubAPI => ({
     return { removed: Boolean(result?.removed) };
   },
 
+  async authActivate(accountId: string): Promise<GitHubAuthStatus> {
+    const { safeInvoke } = await import('../lib/tauriCallbackManager');
+    return safeInvoke<GitHubAuthStatus>('github_auth_activate', { accountId }, { timeout: 8000 });
+  },
+
   async me(): Promise<GitHubUserSummary> {
     const { safeInvoke } = await import('../lib/tauriCallbackManager');
     return safeInvoke<GitHubUserSummary>('github_me', {}, { timeout: 8000 });
@@ -58,5 +68,38 @@ export const createDesktopGitHubAPI = (): GitHubAPI => ({
   async prReady(payload: GitHubPullRequestReadyInput): Promise<GitHubPullRequestReadyResult> {
     const { safeInvoke } = await import('../lib/tauriCallbackManager');
     return safeInvoke<GitHubPullRequestReadyResult>('github_pr_ready', payload, { timeout: 20000 });
+  },
+
+  async issuesList(directory: string, options?: { page?: number }): Promise<GitHubIssuesListResult> {
+    const { safeInvoke } = await import('../lib/tauriCallbackManager');
+    return safeInvoke<GitHubIssuesListResult>('github_issues_list', { directory, page: options?.page ?? 1 }, { timeout: 20000 });
+  },
+
+  async issueGet(directory: string, number: number): Promise<GitHubIssueGetResult> {
+    const { safeInvoke } = await import('../lib/tauriCallbackManager');
+    return safeInvoke<GitHubIssueGetResult>('github_issue_get', { directory, number }, { timeout: 20000 });
+  },
+
+  async issueComments(directory: string, number: number): Promise<GitHubIssueCommentsResult> {
+    const { safeInvoke } = await import('../lib/tauriCallbackManager');
+    return safeInvoke<GitHubIssueCommentsResult>('github_issue_comments', { directory, number }, { timeout: 20000 });
+  },
+
+  async prsList(directory: string, options?: { page?: number }): Promise<GitHubPullRequestsListResult> {
+    const { safeInvoke } = await import('../lib/tauriCallbackManager');
+    return safeInvoke<GitHubPullRequestsListResult>('github_prs_list', { directory, page: options?.page ?? 1 }, { timeout: 20000 });
+  },
+
+  async prContext(
+    directory: string,
+    number: number,
+    options?: { includeDiff?: boolean; includeCheckDetails?: boolean }
+  ): Promise<GitHubPullRequestContextResult> {
+    const { safeInvoke } = await import('../lib/tauriCallbackManager');
+    return safeInvoke<GitHubPullRequestContextResult>(
+      'github_pr_context',
+      { directory, number, includeDiff: Boolean(options?.includeDiff), includeCheckDetails: Boolean(options?.includeCheckDetails) },
+      { timeout: 30000 }
+    );
   },
 });

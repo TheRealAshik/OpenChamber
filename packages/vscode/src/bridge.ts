@@ -15,10 +15,12 @@ import {
 import {
   DEFAULT_GITHUB_CLIENT_ID,
   DEFAULT_GITHUB_SCOPES,
+  activateGitHubAuth,
   clearGitHubAuth,
   exchangeDeviceCode,
   fetchMe,
   readGitHubAuth,
+  readGitHubAuthList,
   startDeviceFlow,
   writeGitHubAuth,
 } from './githubAuth';
@@ -28,6 +30,17 @@ import {
   markPullRequestReady,
   mergePullRequest,
 } from './githubPr';
+
+import {
+  getIssue,
+  listIssueComments,
+  listIssues,
+} from './githubIssues';
+
+import {
+  getPullRequestContext,
+  listPullRequests,
+} from './githubPulls';
 
 export interface BridgeRequest {
   id: string;
@@ -221,6 +234,24 @@ const gitCheckIgnoreNames = async (cwd: string, names: string[]): Promise<Set<st
   );
 };
 
+const gitCheckIgnorePaths = async (cwd: string, paths: string[]): Promise<Set<string>> => {
+  if (paths.length === 0) {
+    return new Set();
+  }
+
+  const result = await execGit(['check-ignore', '--', ...paths], cwd);
+  if (result.exitCode !== 0 || !result.stdout) {
+    return new Set();
+  }
+
+  return new Set(
+    result.stdout
+      .split('\n')
+      .map((name: string) => name.trim())
+      .filter(Boolean)
+  );
+};
+
 const expandTildePath = (value: string) => {
   const trimmed = (value || '').trim();
   if (!trimmed) {
@@ -358,10 +389,12 @@ const searchFilesystemFiles = async (
   query: string,
   limit: number,
   includeHidden: boolean,
-  respectGitignore: boolean
+  respectGitignore: boolean,
+  timeBudgetMs?: number
 ) => {
   const normalizedQuery = (query || '').trim().toLowerCase();
   const matchAll = normalizedQuery.length === 0;
+  const deadline = typeof timeBudgetMs === 'number' && timeBudgetMs > 0 ? Date.now() + timeBudgetMs : null;
 
   const rootUri = vscode.Uri.file(rootPath);
   const queue: vscode.Uri[] = [rootUri];
@@ -369,15 +402,21 @@ const searchFilesystemFiles = async (
   // Collect more candidates for fuzzy matching, then sort and trim
   const collectLimit = matchAll ? limit : Math.max(limit * 3, 200);
   const candidates: Array<{ name: string; path: string; relativePath: string; extension?: string; score: number }> = [];
-  const MAX_CONCURRENCY = 5;
+  const MAX_CONCURRENCY = 10;
 
   while (queue.length > 0 && candidates.length < collectLimit) {
+    if (deadline && Date.now() > deadline) {
+      break;
+    }
     const batch = queue.splice(0, MAX_CONCURRENCY);
     const dirLists = await Promise.all(
       batch.map((dir) => Promise.resolve(vscode.workspace.fs.readDirectory(dir)).catch(() => [] as [string, vscode.FileType][]))
     );
 
     for (let index = 0; index < batch.length; index += 1) {
+      if (deadline && Date.now() > deadline) {
+        break;
+      }
       const currentDir = batch[index];
       const dirents = dirLists[index];
 
@@ -487,37 +526,80 @@ const searchDirectory = async (
     return searchFilesystemFiles(rootPath, '', limit, includeHidden, respectGitignore);
   }
 
+  const escapeGlob = (value: string) => value
+    .replace(/[\\{}()?*]/g, '\\$&')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+  const exclude = '**/{node_modules,.git,dist,build,.next,.turbo,.cache,coverage,tmp,logs}/**';
+  const mapResults = (results: vscode.Uri[]) => results.map((file) => {
+    const absolute = normalizeFsPath(file.fsPath);
+    const relative = normalizeFsPath(path.relative(rootPath, absolute));
+    const name = path.basename(absolute);
+    return {
+      name,
+      path: absolute,
+      relativePath: relative || name,
+      extension: name.includes('.') ? name.split('.').pop()?.toLowerCase() : undefined,
+    };
+  });
+  const filterGitIgnored = async (results: vscode.Uri[]) => {
+    if (!respectGitignore || results.length === 0) {
+      return results;
+    }
+
+    const relativePaths = results.map((file) => {
+      const relative = normalizeFsPath(path.relative(rootPath, file.fsPath));
+      return relative || path.basename(file.fsPath);
+    });
+
+    const ignored = await gitCheckIgnorePaths(rootPath, relativePaths);
+    if (ignored.size === 0) {
+      return results;
+    }
+
+    return results.filter((_, index) => !ignored.has(relativePaths[index]));
+  };
+
   // Fast-path via VS Code's file index (may be case-sensitive depending on platform/workspace).
-  if (!includeHidden) {
-    try {
-      const pattern = `**/*${sanitizedQuery}*`;
-      const exclude = '**/{node_modules,.git,dist,build,.next,.turbo,.cache,coverage,tmp,logs}/**';
-      const results = await vscode.workspace.findFiles(
-        new vscode.RelativePattern(vscode.Uri.file(rootPath), pattern),
+  try {
+    const escapedQuery = escapeGlob(sanitizedQuery);
+    const pattern = `**/*${escapedQuery}*`;
+    const results = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(vscode.Uri.file(rootPath), pattern),
+      exclude,
+      limit,
+    );
+
+    if (Array.isArray(results) && results.length > 0) {
+      const visible = includeHidden ? results : results.filter((file) => !path.basename(file.fsPath).startsWith('.'));
+      const filtered = await filterGitIgnored(visible);
+      if (filtered.length > 0) {
+        return mapResults(filtered);
+      }
+    }
+
+    if (sanitizedQuery.length >= 2 && sanitizedQuery.length <= 32) {
+      const fuzzyPattern = `**/*${escapedQuery.split('').join('*')}*`;
+      const fuzzyResults = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(vscode.Uri.file(rootPath), fuzzyPattern),
         exclude,
         limit,
       );
 
-      if (Array.isArray(results) && results.length > 0) {
-        return results.map((file) => {
-          const absolute = normalizeFsPath(file.fsPath);
-          const relative = normalizeFsPath(path.relative(rootPath, absolute));
-          const name = path.basename(absolute);
-          return {
-            name,
-            path: absolute,
-            relativePath: relative || name,
-            extension: name.includes('.') ? name.split('.').pop()?.toLowerCase() : undefined,
-          };
-        });
+      if (Array.isArray(fuzzyResults) && fuzzyResults.length > 0) {
+        const visible = includeHidden ? fuzzyResults : fuzzyResults.filter((file) => !path.basename(file.fsPath).startsWith('.'));
+        const filtered = await filterGitIgnored(visible);
+        if (filtered.length > 0) {
+          return mapResults(filtered);
+        }
       }
-    } catch {
-      // Fall through to filesystem traversal.
     }
+  } catch {
+    // Fall through to filesystem traversal.
   }
 
   // Fallback: deterministic, case-insensitive traversal with early-exit at limit.
-  return searchFilesystemFiles(rootPath, sanitizedQuery, limit, includeHidden, respectGitignore);
+  return searchFilesystemFiles(rootPath, sanitizedQuery, limit, includeHidden, respectGitignore, 1500);
 };
 
 const fetchModelsMetadata = async () => {
@@ -713,9 +795,8 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       }
 
       case 'api:fs/home': {
-        const workspaceHome = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const home = workspaceHome || os.homedir();
-        return { id, type, success: true, data: { home: normalizeFsPath(home) } };
+        // Match web/desktop semantics: OS home directory.
+        return { id, type, success: true, data: { home: normalizeFsPath(os.homedir()) } };
       }
 
       case 'api:fs:read': {
@@ -957,20 +1038,38 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       case 'api:github/auth:status': {
         const context = ctx?.context;
         if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
-        const stored = await readGitHubAuth(context);
+        const list = await readGitHubAuthList(context);
+        const accounts = list
+          .filter((entry) => entry.user && entry.accountId)
+          .map((entry) => ({
+            id: entry.accountId as string,
+            user: entry.user,
+            scope: entry.scope,
+            current: Boolean(entry.current),
+          }));
+
+        const stored = list.find((entry) => entry.current) || list[0];
         if (!stored?.accessToken) {
-          return { id, type, success: true, data: { connected: false } };
+          return { id, type, success: true, data: { connected: false, accounts } };
         }
 
         try {
           const user = await fetchMe(stored.accessToken);
-          return { id, type, success: true, data: { connected: true, user, scope: stored.scope } };
+          return { id, type, success: true, data: { connected: true, user, scope: stored.scope, accounts } };
         } catch (error: unknown) {
           const status = (error && typeof error === 'object' && 'status' in error) ? (error as { status?: number }).status : undefined;
           const message = error instanceof Error ? error.message : String(error);
           if (status === 401 || message === 'unauthorized') {
             await clearGitHubAuth(context);
-            return { id, type, success: true, data: { connected: false } };
+            const updatedAccounts = (await readGitHubAuthList(context))
+              .filter((entry) => entry.user && entry.accountId)
+              .map((entry) => ({
+                id: entry.accountId as string,
+                user: entry.user,
+                scope: entry.scope,
+                current: Boolean(entry.current),
+              }));
+            return { id, type, success: true, data: { connected: false, accounts: updatedAccounts } };
           }
           return { id, type, success: false, error: message };
         }
@@ -1042,6 +1141,48 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
         if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
         const removed = await clearGitHubAuth(context);
         return { id, type, success: true, data: { removed } };
+      }
+
+      case 'api:github/auth:activate': {
+        const context = ctx?.context;
+        if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
+        const accountId = readStringField(payload, 'accountId');
+        if (!accountId) return { id, type, success: false, error: 'accountId is required' };
+        const activated = await activateGitHubAuth(context, accountId);
+        if (!activated) return { id, type, success: false, error: 'GitHub account not found' };
+        const list = await readGitHubAuthList(context);
+        const accounts = list
+          .filter((entry) => entry.user && entry.accountId)
+          .map((entry) => ({
+            id: entry.accountId as string,
+            user: entry.user,
+            scope: entry.scope,
+            current: Boolean(entry.current),
+          }));
+        const stored = list.find((entry) => entry.current) || list[0];
+        if (!stored?.accessToken) {
+          return { id, type, success: true, data: { connected: false, accounts } };
+        }
+        try {
+          const user = await fetchMe(stored.accessToken);
+          return { id, type, success: true, data: { connected: true, user, scope: stored.scope, accounts } };
+        } catch (error: unknown) {
+          const status = (error && typeof error === 'object' && 'status' in error) ? (error as { status?: number }).status : undefined;
+          const message = error instanceof Error ? error.message : String(error);
+          if (status === 401 || message === 'unauthorized') {
+            await clearGitHubAuth(context);
+            const updatedAccounts = (await readGitHubAuthList(context))
+              .filter((entry) => entry.user && entry.accountId)
+              .map((entry) => ({
+                id: entry.accountId as string,
+                user: entry.user,
+                scope: entry.scope,
+                current: Boolean(entry.current),
+              }));
+            return { id, type, success: true, data: { connected: false, accounts: updatedAccounts } };
+          }
+          return { id, type, success: false, error: message };
+        }
       }
 
       case 'api:github/me': {
@@ -1167,6 +1308,128 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
           if (status === 401 || message === 'unauthorized') {
             await clearGitHubAuth(context);
           }
+          return { id, type, success: false, error: message };
+        }
+      }
+
+      case 'api:github/issues:list': {
+        const context = ctx?.context;
+        if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
+        const stored = await readGitHubAuth(context);
+        if (!stored?.accessToken) {
+          return { id, type, success: true, data: { connected: false } };
+        }
+        const directory = readStringField(payload, 'directory');
+        const page = readNumberField(payload, 'page') ?? 1;
+        if (!directory) {
+          return { id, type, success: false, error: 'directory is required' };
+        }
+        try {
+          const result = await listIssues(stored.accessToken, directory, page);
+          if (result.connected === false) {
+            await clearGitHubAuth(context);
+          }
+          return { id, type, success: true, data: result };
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { id, type, success: false, error: message };
+        }
+      }
+
+      case 'api:github/issues:get': {
+        const context = ctx?.context;
+        if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
+        const stored = await readGitHubAuth(context);
+        if (!stored?.accessToken) {
+          return { id, type, success: true, data: { connected: false } };
+        }
+        const directory = readStringField(payload, 'directory');
+        const number = readNumberField(payload, 'number') ?? 0;
+        if (!directory || !number) {
+          return { id, type, success: false, error: 'directory and number are required' };
+        }
+        try {
+          const result = await getIssue(stored.accessToken, directory, number);
+          if (result.connected === false) {
+            await clearGitHubAuth(context);
+          }
+          return { id, type, success: true, data: result };
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { id, type, success: false, error: message };
+        }
+      }
+
+      case 'api:github/issues:comments': {
+        const context = ctx?.context;
+        if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
+        const stored = await readGitHubAuth(context);
+        if (!stored?.accessToken) {
+          return { id, type, success: true, data: { connected: false } };
+        }
+        const directory = readStringField(payload, 'directory');
+        const number = readNumberField(payload, 'number') ?? 0;
+        if (!directory || !number) {
+          return { id, type, success: false, error: 'directory and number are required' };
+        }
+        try {
+          const result = await listIssueComments(stored.accessToken, directory, number);
+          if (result.connected === false) {
+            await clearGitHubAuth(context);
+          }
+          return { id, type, success: true, data: result };
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { id, type, success: false, error: message };
+        }
+      }
+
+      case 'api:github/pulls:list': {
+        const context = ctx?.context;
+        if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
+        const stored = await readGitHubAuth(context);
+        if (!stored?.accessToken) {
+          return { id, type, success: true, data: { connected: false } };
+        }
+        const directory = readStringField(payload, 'directory');
+        const page = readNumberField(payload, 'page') ?? 1;
+        if (!directory) {
+          return { id, type, success: false, error: 'directory is required' };
+        }
+        try {
+          const result = await listPullRequests(stored.accessToken, directory, page);
+          if (result.connected === false) {
+            await clearGitHubAuth(context);
+          }
+          return { id, type, success: true, data: result };
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          return { id, type, success: false, error: message };
+        }
+      }
+
+      case 'api:github/pulls:context': {
+        const context = ctx?.context;
+        if (!context) return { id, type, success: false, error: 'Missing VS Code context' };
+        const stored = await readGitHubAuth(context);
+        if (!stored?.accessToken) {
+          return { id, type, success: true, data: { connected: false } };
+        }
+        const directory = readStringField(payload, 'directory');
+        const number = readNumberField(payload, 'number') ?? 0;
+        const includeDiff = readBooleanField(payload, 'includeDiff') ?? false;
+        const includeCheckDetails = readBooleanField(payload, 'includeCheckDetails') ?? false;
+        if (!directory || !number) {
+          return { id, type, success: false, error: 'directory and number are required' };
+        }
+        try {
+          const result = await getPullRequestContext(stored.accessToken, directory, number, includeDiff, includeCheckDetails);
+          if (result.connected === false) {
+            await clearGitHubAuth(context);
+          }
+          return { id, type, success: true, data: result };
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
           return { id, type, success: false, error: message };
         }
       }
@@ -2024,6 +2287,7 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       }
 
       case 'api:git/ignore-openchamber': {
+        // LEGACY_WORKTREES: only needed for <project>/.openchamber era. Safe to remove after legacy support dropped.
         const { directory } = (payload || {}) as { directory?: string };
         if (!directory) {
           return { id, type, success: false, error: 'Directory is required' };

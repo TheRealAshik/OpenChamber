@@ -2,7 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.6.0] - 2026-01-29
+
+- Chat: added message stall detection with automatic soft resync for more reliable message delivery.
+- Chat: fixed "Load older" button behavior in chat with proper pagination implementation.
+- Git: PR picker now validates local branch existence and includes a refresh action.
+- Git: worktree integration now syncs clean target directories before merging.
+- Diff: fixed memory leak when viewing many modified files; large changesets now lazy-load for smoother performance.
+- VSCode: session activity status now updates reliably even when the webview is hidden.
+- Web: session activity tracking now works consistently across browser tabs.
+- Reliability: plans directory no longer errors when missing.
+
+
+## [1.5.9] - 2026-01-28
+
+- Worktrees: migrated to Opencode SDK worktree implementation; sessions in worktrees are now completely isolated.
+- Git: integrate worktree commits back to a target branch with commit previews and guided conflict handling.
+- Files: toggle markdown preview when viewing files (thanks to @Jovines).
+- Files: open the file viewer in fullscreen for focused review and editing (thanks to @TaylorBeeston).
+- Plans: switch between markdown preview and edit mode in the Plan view.
+- UI: Files, Diff, Git, and Terminal now follow the active session/worktree directory, including new-session drafts.
+- Web: plan lists no longer error when the plans directory is missing.
+
+
+## [1.5.8] - 2026-01-26
+
+- Plans: new Plan/Build mode switching support with dedicated Plan content view with per-session context.
+- GitHub: sign in with multiple accounts and smoother auth flow.
+- Chat/UI: linkable mentions, better wrapping, and markdown/scroll polish in messages.
+- Skills: ClawdHub catalog now pages results and retries transient failures.
+- Diff: fixed Chrome scrolling in All Files layout.
+- Mobile: improved layout for attachments, git, and permissions on small screens (thanks to @nelsonPires5).
+- Web: iOS safe-area support for the PWA header.
+- Activity: added a text-justification setting for activity summaries (thanks to @iyangdianfeng).
+- Reliability: file lists and message sends handle missing directories and transient errors more gracefully.
+
+
+## [1.5.7] - 2026-01-24
+
+- GitHub: PR panel supports fork PR detection by branch name.
+- GitHub: Git tab PR panel can send failed checks/comments to chat with hidden context; added check details dialog with Actions step breakdown.
+- Web: GitHub auth flow fixes.
+
+
+## [1.5.6] - 2026-01-24
+
+- GitHub: connect your account in Settings with device-flow auth to enable GitHub tools.
+- Sessions: start new sessions from GitHub issues with seeded context (title, body, labels, comments).
+- Sessions: start new sessions from GitHub pull requests with PR context baked in (including diffs).
+- Git: manage pull requests in the Git view with AI-generated descriptions, status checks, ready-for-review, and merge actions.
+- Mobile: fixed CommandAutocomplete dropdown scrolling (thanks to @nelsonPires5).
+
 
 ## [1.5.5] - 2026-01-23
 

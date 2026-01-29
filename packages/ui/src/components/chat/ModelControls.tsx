@@ -35,11 +35,11 @@ import { Input } from '@/components/ui/input';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
+import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useIsDesktopRuntime, useIsVSCodeRuntime } from '@/hooks/useRuntimeAPIs';
 import { getAgentColor } from '@/lib/agentColors';
 import { useDeviceInfo } from '@/lib/device';
-import { calculateEditPermissionUIState, type BashPermissionSetting } from '@/lib/permissions/editPermissionDefaults';
 import { getEditModeColors } from '@/lib/permissions/editModeColors';
 import { cn, fuzzyMatch } from '@/lib/utils';
 import { useContextStore } from '@/stores/contextStore';
@@ -47,6 +47,7 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useModelLists } from '@/hooks/useModelLists';
+import { useIsTextTruncated } from '@/hooks/useIsTextTruncated';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type IconComponent = ComponentType<any>;
@@ -100,23 +101,6 @@ const resolveWildcardPermissionAction = (ruleset: unknown, permission: string): 
     }
 
     return undefined;
-};
-
-const buildPermissionActionMap = (ruleset: unknown, permission: string): Record<string, PermissionAction | undefined> | undefined => {
-    const rules = asPermissionRuleset(ruleset);
-    if (!rules || rules.length === 0) {
-        return undefined;
-    }
-
-    const map: Record<string, PermissionAction | undefined> = {};
-    for (const rule of rules) {
-        if (rule.permission !== permission) {
-            continue;
-        }
-        map[rule.pattern] = rule.action;
-    }
-
-    return Object.keys(map).length > 0 ? map : undefined;
 };
 
 interface CapabilityDefinition {
@@ -295,17 +279,45 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         currentSessionId,
         messages,
         saveSessionAgentSelection,
-        getSessionAgentSelection,
         saveAgentModelForSession,
         getAgentModelForSession,
         saveAgentModelVariantForSession,
         getAgentModelVariantForSession,
         analyzeAndSaveExternalSessionChoices,
-        getSessionAgentEditMode,
-        setSessionAgentEditMode,
     } = useSessionStore();
 
     const contextHydrated = useContextStore((state) => state.hasHydrated);
+
+    const sessionSavedAgentName = useContextStore((state) =>
+        currentSessionId ? state.sessionAgentSelections.get(currentSessionId) ?? null : null
+    );
+
+    const stickySessionAgentRef = React.useRef<string | null>(null);
+    React.useEffect(() => {
+        if (!currentSessionId) {
+            stickySessionAgentRef.current = null;
+            return;
+        }
+        if (sessionSavedAgentName) {
+            stickySessionAgentRef.current = sessionSavedAgentName;
+        }
+    }, [currentSessionId, sessionSavedAgentName]);
+
+    const stickySessionAgentName = currentSessionId ? stickySessionAgentRef.current : null;
+
+    // Prefer per-session selection over global config to avoid flicker during server-driven mode switches.
+    const uiAgentName = currentSessionId
+        ? (sessionSavedAgentName || stickySessionAgentName || currentAgentName)
+        : currentAgentName;
+
+    const sessionIdForEditMode = currentSessionId ?? '__global__';
+    const sessionEditMode = useContextStore((state) => {
+        if (!uiAgentName) {
+            return undefined;
+        }
+        return state.getSessionAgentEditMode(sessionIdForEditMode, uiAgentName, 'ask');
+    });
+    const setSessionAgentEditMode = useContextStore((state) => state.setSessionAgentEditMode);
     const { toggleFavoriteModel, isFavoriteModel, addRecentModel, isModelSelectorOpen, setModelSelectorOpen } = useUIStore();
     const { favoriteModelsList, recentModelsList } = useModelLists();
 
@@ -327,12 +339,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         }
         return initial;
     });
-    const [mobileEditOptionsOpen, setMobileEditOptionsOpen] = React.useState(false);
     // Use global state for model selector (allows Ctrl+M shortcut)
     const agentMenuOpen = isModelSelectorOpen;
     const setAgentMenuOpen = setModelSelectorOpen;
-    const [desktopEditOptionsOpen, setDesktopEditOptionsOpen] = React.useState(false);
-    const desktopEditOptionsId = React.useId();
     const [desktopModelQuery, setDesktopModelQuery] = React.useState('');
     const [modelSelectedIndex, setModelSelectedIndex] = React.useState(0);
     const modelItemRefs = React.useRef<(HTMLDivElement | null)[]>([]);
@@ -350,9 +359,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
     }, [activeMobilePanel, currentProviderId]);
 
     React.useEffect(() => {
-        if (activeMobilePanel !== 'agent') {
-            setMobileEditOptionsOpen(false);
-        }
         if (activeMobilePanel !== 'model') {
             setMobileModelQuery('');
         }
@@ -364,7 +370,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         prevAgentMenuOpenRef.current = agentMenuOpen;
 
         if (!agentMenuOpen) {
-            setDesktopEditOptionsOpen(false);
             setDesktopModelQuery('');
             setModelSelectedIndex(0);
 
@@ -383,81 +388,27 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         setModelSelectedIndex(0);
     }, [desktopModelQuery]);
 
-    const currentAgent = getCurrentAgent?.();
+    const currentAgent = React.useMemo(() => {
+        if (uiAgentName) {
+            return agents.find((agent) => agent.name === uiAgentName);
+        }
+        return getCurrentAgent?.();
+    }, [agents, getCurrentAgent, uiAgentName]);
 
-    const agentDefaultEditMode = React.useMemo<EditPermissionMode>(() => {
+    const agentEditAction = React.useMemo<PermissionAction>(() => {
         if (!currentAgent) {
             return 'deny';
         }
-        const action = resolveWildcardPermissionAction(currentAgent.permission, 'edit') ?? 'ask';
-        return action;
+        return resolveWildcardPermissionAction(currentAgent.permission, 'edit') ?? 'allow';
     }, [currentAgent]);
 
-    const agentWebfetchPermission = React.useMemo(() => {
-        if (!currentAgent) {
-            return undefined;
-        }
-        return resolveWildcardPermissionAction(currentAgent.permission, 'webfetch');
-    }, [currentAgent]);
+    const selectionContextReady = Boolean(uiAgentName);
 
-    const agentBashPermission = React.useMemo<BashPermissionSetting | undefined>(() => {
-        if (!currentAgent) {
-            return undefined;
-        }
-        const map = buildPermissionActionMap(currentAgent.permission, 'bash');
-        return map ? (map as BashPermissionSetting) : undefined;
-    }, [currentAgent]);
-
-    const permissionUiState = React.useMemo(() => calculateEditPermissionUIState({
-        agentDefaultEditMode,
-        webfetchPermission: agentWebfetchPermission,
-        bashPermission: agentBashPermission,
-    }), [agentDefaultEditMode, agentWebfetchPermission, agentBashPermission]);
-
-    const { cascadeDefaultMode, modeAvailability, autoApproveAvailable } = permissionUiState;
-
-    const selectionContextReady = Boolean(currentSessionId && currentAgentName);
-    const sessionMode = selectionContextReady && currentSessionId && currentAgentName
-        ? getSessionAgentEditMode(currentSessionId, currentAgentName, cascadeDefaultMode)
-        : cascadeDefaultMode;
-
-    const editModeShortLabels: Record<EditPermissionMode, string> = {
-        ask: 'Ask before edits',
-        allow: 'Approve edit tools',
-        full: 'Approve every tool',
-        deny: 'Editing disabled',
-    };
-
-    const isModeDisabled = React.useCallback((mode: EditPermissionMode) => {
-        return !modeAvailability[mode];
-    }, [modeAvailability]);
-
-    const effectiveEditMode = React.useMemo(() => {
-        if (!selectionContextReady) {
-            return cascadeDefaultMode;
-        }
-        if (isModeDisabled(sessionMode) && sessionMode !== cascadeDefaultMode) {
-            return cascadeDefaultMode;
-        }
-        return sessionMode;
-    }, [cascadeDefaultMode, isModeDisabled, selectionContextReady, sessionMode]);
-
-    const editPermissionOptions: Array<{ mode: EditPermissionMode; label: string; disabled: boolean }> = [
-        { mode: 'ask', label: editModeShortLabels.ask, disabled: isModeDisabled('ask') },
-        { mode: 'allow', label: editModeShortLabels.allow, disabled: isModeDisabled('allow') },
-        { mode: 'full', label: editModeShortLabels.full, disabled: isModeDisabled('full') },
-    ];
-
-    const activeEditModeColors = React.useMemo(() => getEditModeColors(effectiveEditMode), [effectiveEditMode]);
-
-    const editToggleDisabled = !selectionContextReady || !autoApproveAvailable;
-
-    React.useEffect(() => {
-        if (editToggleDisabled) {
-            setMobileEditOptionsOpen(false);
-            setDesktopEditOptionsOpen(false);
-        }
-    }, [editToggleDisabled]);
+    const approveEditsAvailable = agentEditAction === 'ask';
+    const approveEditsChecked = approveEditsAvailable
+        ? sessionEditMode === 'allow' || sessionEditMode === 'full'
+        : agentEditAction === 'allow';
+    const approveEditsDisabled = !selectionContextReady || !approveEditsAvailable;
 
     const sizeVariant: 'mobile' | 'vscode' | 'default' = isMobile ? 'mobile' : isVSCodeRuntime ? 'vscode' : 'default';
     const buttonHeight = sizeVariant === 'mobile' ? 'h-9' : sizeVariant === 'vscode' ? 'h-6' : 'h-8';
@@ -465,8 +416,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
     const controlIconSize = sizeVariant === 'mobile' ? 'h-5 w-5' : sizeVariant === 'vscode' ? 'h-4 w-4' : 'h-4 w-4';
     const controlTextSize = isCompact ? 'typography-micro' : 'typography-meta';
     const inlineGapClass = sizeVariant === 'mobile' ? 'gap-x-1' : sizeVariant === 'vscode' ? 'gap-x-1' : 'gap-x-3';
-    const editPermissionMenuLabel = editModeShortLabels[effectiveEditMode];
-
     const renderEditModeIcon = React.useCallback((mode: EditPermissionMode, iconClass = editToggleIconClass) => {
         const combinedClassName = cn(iconClass, 'flex-shrink-0');
         const modeColors = getEditModeColors(mode);
@@ -485,15 +434,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         return <RiQuestionLine className={combinedClassName} style={iconStyle} />;
     }, [editToggleIconClass]);
 
-    const handleEditPermissionSelect = React.useCallback((mode: EditPermissionMode) => {
-        if (editToggleDisabled || !currentSessionId || !currentAgentName || isModeDisabled(mode)) {
+    const handleApproveEditsToggle = React.useCallback((checked: boolean) => {
+        if (!selectionContextReady || !currentAgentName || !approveEditsAvailable) {
             return;
         }
-        setSessionAgentEditMode(currentSessionId, currentAgentName, mode, cascadeDefaultMode);
-        setAgentMenuOpen(false);
-        setMobileEditOptionsOpen(false);
-        setDesktopEditOptionsOpen(false);
-    }, [cascadeDefaultMode, editToggleDisabled, currentSessionId, currentAgentName, setSessionAgentEditMode, setAgentMenuOpen, setDesktopEditOptionsOpen, isModeDisabled]);
+        setSessionAgentEditMode(sessionIdForEditMode, currentAgentName, checked ? 'allow' : 'ask', 'ask');
+    }, [approveEditsAvailable, currentAgentName, selectionContextReady, setSessionAgentEditMode, sessionIdForEditMode]);
 
     const currentProvider = getCurrentProvider();
     const models = Array.isArray(currentProvider?.models) ? currentProvider.models : [];
@@ -534,6 +480,23 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         resolved: boolean;
         inFlight: boolean;
     } | null>(null);
+
+    // If we have an explicit per-session agent selection (eg. server-injected mode switch),
+    // treat the session as resolved and don't run inference/fallback that could cause flicker.
+    React.useEffect(() => {
+        if (!currentSessionId) {
+            return;
+        }
+        const refState = sessionInitializationRef.current;
+        if (!refState || refState.sessionId !== currentSessionId) {
+            return;
+        }
+
+        if (sessionSavedAgentName && agents.some((agent) => agent.name === sessionSavedAgentName)) {
+            refState.resolved = true;
+            refState.inFlight = false;
+        }
+    }, [agents, currentSessionId, sessionSavedAgentName]);
 
     const tryApplyModelSelection = React.useCallback(
         (providerId: string, modelId: string, agentName?: string): ModelApplyResult => {
@@ -597,7 +560,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         };
 
         const applySavedSelections = (): 'resolved' | 'waiting' | 'continue' => {
-            const savedAgentName = getSessionAgentSelection(currentSessionId);
+            const savedAgentName = currentSessionId
+                ? (useContextStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current)
+                : null;
             if (savedAgentName) {
                 if (currentAgentName !== savedAgentName) {
                     setAgent(savedAgentName);
@@ -627,7 +592,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                     setAgent(agent.name);
                 }
 
-                saveSessionAgentSelection(currentSessionId, agent.name);
+                const existingSelection = useContextStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current;
+                if (!existingSelection) {
+                    saveSessionAgentSelection(currentSessionId, agent.name);
+                }
                 const result = tryApplyModelSelection(selection.providerId, selection.modelId, agent.name);
                 if (result === 'applied') {
                     return 'resolved';
@@ -645,13 +613,33 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                 return;
             }
 
+            const existingSelection = currentSessionId
+                ? (useContextStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current)
+                : null;
+
+            // If we already have a valid agent selected (often from server-injected mode switch),
+            // don't override it with a fallback.
+            const preferred =
+                (currentSessionId
+                    ? (useContextStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current)
+                    : null) ||
+                currentAgentName;
+            if (preferred && agents.some((agent) => agent.name === preferred)) {
+                if (currentAgentName !== preferred) {
+                    setAgent(preferred);
+                }
+                return;
+            }
+
             const primaryAgents = agents.filter(agent => isPrimaryMode(agent.mode));
             const fallbackAgent = agents.find(agent => agent.name === 'build') || primaryAgents[0] || agents[0];
             if (!fallbackAgent) {
                 return;
             }
 
-            saveSessionAgentSelection(currentSessionId, fallbackAgent.name);
+            if (!existingSelection) {
+                saveSessionAgentSelection(currentSessionId, fallbackAgent.name);
+            }
 
             if (currentAgentName !== fallbackAgent.name) {
                 setAgent(fallbackAgent.name);
@@ -697,7 +685,17 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                             }
 
                             if (latestAgent) {
-                                saveSessionAgentSelection(currentSessionId, latestAgent);
+                                // If server/user already selected an agent for this session, don't override
+                                // with heuristic inference mid-stream.
+                                const latestSaved = useContextStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current;
+                                if (latestSaved && latestSaved !== latestAgent) {
+                                    finalize();
+                                    return;
+                                }
+
+                                if (!latestSaved) {
+                                    saveSessionAgentSelection(currentSessionId, latestAgent);
+                                }
                                 if (currentAgentName !== latestAgent) {
                                     setAgent(latestAgent);
                                 }
@@ -736,6 +734,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                     }
                 }
 
+                if (isCancelled) {
+                    return;
+                }
+
                 applyFallbackAgent();
                 finalize();
             } catch (error) {
@@ -755,7 +757,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         currentSessionMessageCount,
         agents,
         currentAgentName,
-        getSessionAgentSelection,
         getAgentModelForSession,
         setAgent,
         tryApplyModelSelection,
@@ -763,6 +764,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         saveSessionAgentSelection,
         contextHydrated,
         providers,
+        sessionSavedAgentName,
     ]);
 
     React.useEffect(() => {
@@ -770,8 +772,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
             return;
         }
 
-        const savedAgentName = getSessionAgentSelection(currentSessionId);
-        const preferredAgent = savedAgentName || currentAgentName;
+        const preferredAgent = sessionSavedAgentName || currentAgentName;
         if (!preferredAgent) {
             return;
         }
@@ -812,10 +813,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         currentModelId,
         providers,
         agents,
-        getSessionAgentSelection,
         getAgentModelForSession,
         tryApplyModelSelection,
         setAgent,
+        sessionSavedAgentName,
     ]);
 
     React.useEffect(() => {
@@ -1007,15 +1008,19 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         return getModelDisplayName(currentModel);
     };
 
+    const currentModelDisplayName = getCurrentModelDisplayName();
+    const modelLabelRef = React.useRef<HTMLSpanElement>(null);
+    const isModelLabelTruncated = useIsTextTruncated(modelLabelRef, [currentModelDisplayName, isCompact]);
+
     const getAgentDisplayName = () => {
-        if (!currentAgentName) {
+        if (!uiAgentName) {
             const primaryAgents = agents.filter(agent => isPrimaryMode(agent.mode));
             const buildAgent = primaryAgents.find(agent => agent.name === 'build');
             const defaultAgent = buildAgent || primaryAgents[0];
             return defaultAgent ? capitalizeAgentName(defaultAgent.name) : 'Select Agent';
         }
-        const agent = agents.find(a => a.name === currentAgentName);
-        return agent ? capitalizeAgentName(agent.name) : capitalizeAgentName(currentAgentName);
+        const agent = agents.find(a => a.name === uiAgentName);
+        return agent ? capitalizeAgentName(agent.name) : capitalizeAgentName(uiAgentName);
     };
 
     const capitalizeAgentName = (name: string) => {
@@ -1630,7 +1635,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
             >
                 <div className="flex flex-col gap-1.5">
                     {primaryAgents.map((agent) => {
-                        const isSelected = agent.name === currentAgentName;
+                        const isSelected = agent.name === uiAgentName;
                         const agentColor = getAgentColor(agent.name);
                         return (
                             <button
@@ -1661,94 +1666,20 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                             </button>
                         );
                     })}
-                    <div className="rounded-xl border border-border/40 bg-sidebar/30">
-                        <button
-                            type="button"
-                            disabled={editToggleDisabled}
-                            onClick={() => {
-                                if (!editToggleDisabled) {
-                                    setMobileEditOptionsOpen((previous) => !previous);
-                                }
-                            }}
-                            className={cn(
-                                'flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left bg-transparent',
-                                'focus:outline-none focus-visible:ring-1 focus-visible:ring-primary rounded-t-xl',
-                                editToggleDisabled ? 'cursor-not-allowed opacity-60' : undefined
-                            )}
-                        >
-                            <div className="flex flex-col text-left">
-                                <span
-                                    className="typography-meta font-medium text-foreground"
-                                    style={{
-                                        color: activeEditModeColors ? activeEditModeColors.text : 'var(--foreground)',
-                                        mixBlendMode: 'normal',
-                                    }}
-                                >
-                                    {editPermissionMenuLabel}
-                                </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <span
-                                    className={cn(
-                                        'flex items-center justify-center p-1',
-                                        !activeEditModeColors && 'text-muted-foreground'
-                                    )}
-                                    style={
-                                        activeEditModeColors
-                                            ? {
-                                                  color: activeEditModeColors.text,
-                                              }
-                                            : undefined
-                                    }
-                                >
-                                    {renderEditModeIcon(effectiveEditMode, editToggleIconClass)}
-                                </span>
-                                <RiArrowDownSLine
-                                    className={cn(
-                                        'h-4 w-4 text-muted-foreground transition-transform',
-                                        mobileEditOptionsOpen ? 'rotate-180' : ''
-                                    )}
-                                />
-                            </div>
-                        </button>
-                        {mobileEditOptionsOpen && !editToggleDisabled && (
-                            <div className="border-t border-border/40 bg-transparent px-2 py-1.5">
-                                <div className="flex flex-col gap-1.5">
-                                    {editPermissionOptions.map((option) => {
-                                        const isSelected = option.mode === effectiveEditMode;
-                                        const optionColors = getEditModeColors(option.mode);
-                                        return (
-                                            <button
-                                                key={option.mode}
-                                                type="button"
-                                                disabled={option.disabled}
-                                                onClick={() => handleEditPermissionSelect(option.mode)}
-                                                className={cn(
-                                                    'flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left',
-                                                    option.disabled ? 'cursor-not-allowed opacity-50' : 'focus:bg-transparent hover:bg-transparent',
-                                                    isSelected ? 'bg-primary/10' : undefined
-                                                )}
-                                                style={isSelected && optionColors ? { backgroundColor: optionColors.background ?? undefined } : undefined}
-                                            >
-                                                {renderEditModeIcon(option.mode, editToggleIconClass)}
-                                                <div className="flex flex-col">
-                                                    <span
-                                                        className="typography-meta font-medium"
-                                                        style={{
-                                                            color: optionColors
-                                                                ? optionColors.text
-                                                                : 'var(--foreground)',
-                                                        }}
-                                                    >
-                                                        {option.label}
-                                                    </span>
-                                                </div>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        )}
+                    <div className="rounded-xl bg-transparent">
+                        <div className="flex items-center justify-between px-2 py-2">
+                            <span className={cn(
+                                'typography-meta font-medium',
+                                approveEditsDisabled ? 'text-muted-foreground' : 'text-foreground'
+                            )}>
+                                Auto-approve edits
+                            </span>
+                            <Switch
+                                checked={approveEditsChecked}
+                                disabled={approveEditsDisabled}
+                                onCheckedChange={handleApproveEditsToggle}
+                            />
+                        </div>
                     </div>
                 </div>
             </MobileOverlayPanel>
@@ -1864,6 +1795,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         const isSelected = currentProviderId === providerID && currentModelId === modelID;
         const isFavorite = isFavoriteModel(providerID, modelID);
 
+        const showProviderLogo = keyPrefix === 'fav' || keyPrefix === 'recent';
+
         return (
             <div
                 key={`${keyPrefix}-${providerID}-${modelID}`}
@@ -1876,6 +1809,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                 onMouseEnter={() => setModelSelectedIndex(flatIndex)}
             >
                 <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                    {showProviderLogo && (
+                        <ProviderLogo providerId={providerID} className="h-3.5 w-3.5 flex-shrink-0" />
+                    )}
                     <span className="font-medium truncate">
                         {getModelDisplayName(model)}
                     </span>
@@ -2046,19 +1982,20 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                                     ) : (
                                         <RiPencilAiLine className={cn(controlIconSize, 'text-muted-foreground')} />
                                     )}
-                                    <span
-                                        key={`${currentProviderId}-${currentModelId}`}
-                                        className={cn(
-                                            'model-controls__model-label overflow-hidden',
-                                            controlTextSize,
-                                            'font-medium whitespace-nowrap text-foreground min-w-0',
-                                            'max-w-[260px]'
-                                        )}
-                                    >
-                                        <span className="marquee-text">
-                                            {getCurrentModelDisplayName()}
+                                        <span
+                                            ref={modelLabelRef}
+                                            key={`${currentProviderId}-${currentModelId}`}
+                                            className={cn(
+                                                'model-controls__model-label overflow-hidden',
+                                                controlTextSize,
+                                                'font-medium whitespace-nowrap text-foreground min-w-0',
+                                                'max-w-[260px]'
+                                            )}
+                                        >
+                                            <span className={cn('marquee-text', isModelLabelTruncated && 'marquee-text--active')}>
+                                                {currentModelDisplayName}
+                                            </span>
                                         </span>
-                                    </span>
                                 </div>
                             </DropdownMenuTrigger>
                         </TooltipTrigger>
@@ -2170,13 +2107,14 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                             <RiPencilAiLine className={cn(controlIconSize, 'text-muted-foreground')} />
                         )}
                         <span
+                            ref={modelLabelRef}
                             className={cn(
                                 'model-controls__model-label typography-micro font-medium overflow-hidden min-w-0',
                                 isMobile ? 'max-w-[120px]' : 'max-w-[220px]',
                             )}
                         >
-                            <span className="marquee-text">
-                                {getCurrentModelDisplayName()}
+                            <span className={cn('marquee-text', isModelLabelTruncated && 'marquee-text--active')}>
+                                {currentModelDisplayName}
                             </span>
                         </span>
                     </button>
@@ -2418,10 +2356,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                                             className={cn(
                                                 controlIconSize,
                                                 'flex-shrink-0',
-                                                currentAgentName ? '' : 'text-muted-foreground'
-                                            )}
-                                            style={currentAgentName ? { color: `var(${getAgentColor(currentAgentName).var})` } : undefined}
-                                        />
+                                        uiAgentName ? '' : 'text-muted-foreground'
+                                    )}
+                                    style={uiAgentName ? { color: `var(${getAgentColor(uiAgentName).var})` } : undefined}
+                                />
                                         <span
                                             className={cn(
                                                 'model-controls__agent-label',
@@ -2429,7 +2367,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                                                 'font-medium min-w-0 truncate',
                                                 isDesktopRuntime ? 'max-w-[220px]' : undefined
                                             )}
-                                            style={currentAgentName ? { color: `var(${getAgentColor(currentAgentName).var})` } : undefined}
+                                            style={uiAgentName ? { color: `var(${getAgentColor(uiAgentName).var})` } : undefined}
                                         >
                                             {getAgentDisplayName()}
                                         </span>
@@ -2461,96 +2399,21 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                                 ))}
                                 <DropdownMenuSeparator />
                                 <div className="flex flex-col gap-1 px-1 py-0.5">
-                                    <button
-                                        type="button"
-                                        disabled={editToggleDisabled}
-                                        onClick={() => {
-                                            if (editToggleDisabled) {
-                                                return;
-                                            }
-                                            setDesktopEditOptionsOpen((previous) => !previous);
-                                        }}
-                                        className={cn(
-                                            'flex w-full items-center justify-between gap-2 rounded-xl px-2 py-2 text-left',
-                                            'focus:outline-none focus-visible:ring-0',
-                                            editToggleDisabled ? 'cursor-not-allowed opacity-60' : undefined
-                                        )}
-                                        aria-expanded={desktopEditOptionsOpen}
-                                        aria-controls={desktopEditOptionsId}
-                                    >
-                                        <div className="flex flex-col text-left">
-                                            <span
-                                                className="typography-meta font-medium text-foreground"
-                                                style={{
-                                                    color: activeEditModeColors
-                                                        ? activeEditModeColors.text
-                                                        : 'var(--foreground)',
-                                                }}
-                                            >
-                                                {editPermissionMenuLabel}
+                                    <div className="rounded-xl bg-transparent">
+                                        <div className="flex items-center justify-between px-2 py-2">
+                                            <span className={cn(
+                                                'typography-meta font-medium',
+                                                approveEditsDisabled ? 'text-muted-foreground' : 'text-foreground'
+                                            )}>
+                                                Auto-approve edits
                                             </span>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span
-                                                className={cn(
-                                                    'flex items-center justify-center p-1',
-                                                    !activeEditModeColors && 'text-muted-foreground'
-                                                )}
-                                                style={
-                                                    activeEditModeColors
-                                                        ? {
-                                                              color: activeEditModeColors.text,
-                                                          }
-                                                        : undefined
-                                                }
-                                            >
-                                                {renderEditModeIcon(effectiveEditMode)}
-                                            </span>
-                                            <RiArrowDownSLine
-                                                className={cn(
-                                                    'h-3.5 w-3.5 transition-transform text-muted-foreground',
-                                                    desktopEditOptionsOpen ? 'rotate-180' : ''
-                                                )}
+                                            <Switch
+                                                checked={approveEditsChecked}
+                                                disabled={approveEditsDisabled}
+                                                onCheckedChange={handleApproveEditsToggle}
                                             />
                                         </div>
-                                    </button>
-                                    {desktopEditOptionsOpen && !editToggleDisabled && (
-                                        <div
-                                            id={desktopEditOptionsId}
-                                            className="flex flex-col gap-1 rounded-xl border border-border/40 px-2 py-2 bg-transparent"
-                                            role="group"
-                                            aria-label="Edit permission options"
-                                        >
-                                            {editPermissionOptions.map((option) => {
-                                                const isSelected = option.mode === effectiveEditMode;
-                                                const optionColors = getEditModeColors(option.mode);
-                                                return (
-                                                    <button
-                                                        key={option.mode}
-                                                        type="button"
-                                                        disabled={option.disabled}
-                                                        onClick={() => handleEditPermissionSelect(option.mode)}
-                                                        className={cn(
-                                                            'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left',
-                                                            option.disabled ? 'cursor-not-allowed opacity-50' : 'focus:outline-none focus-visible:ring-0',
-                                                            isSelected ? 'bg-primary/10' : undefined
-                                                        )}
-                                                        style={isSelected && optionColors ? { backgroundColor: optionColors.background ?? undefined } : undefined}
-                                                    >
-                                                        {renderEditModeIcon(option.mode, editToggleIconClass)}
-                                                        <span
-                                                            className="typography-meta font-medium"
-                                                            style={{
-                                                                color: optionColors ? optionColors.text : 'var(--foreground)',
-                                                            }}
-                                                        >
-                                                            {option.label}
-                                                        </span>
-                                                    </button>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
+                                    </div>
                                 </div>
                             </DropdownMenuContent>
                         </DropdownMenu>
@@ -2573,14 +2436,14 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                     'cursor-pointer hover:opacity-70',
                 )}
             >
-                <RiAiAgentLine
-                    className={cn(
-                        controlIconSize,
-                        'flex-shrink-0',
-                        currentAgentName ? '' : 'text-muted-foreground'
-                    )}
-                    style={currentAgentName ? { color: `var(${getAgentColor(currentAgentName).var})` } : undefined}
-                />
+                                        <RiAiAgentLine
+                                            className={cn(
+                                                controlIconSize,
+                                                'flex-shrink-0',
+                                                uiAgentName ? '' : 'text-muted-foreground'
+                                            )}
+                                            style={uiAgentName ? { color: `var(${getAgentColor(uiAgentName).var})` } : undefined}
+                                        />
                 <span
                     className={cn(
                         'model-controls__agent-label',
@@ -2588,10 +2451,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                         'font-medium truncate min-w-0',
                         isMobile && 'max-w-[60px]'
                     )}
-                    style={currentAgentName ? { color: `var(${getAgentColor(currentAgentName).var})` } : undefined}
-                >
-                    {getAgentDisplayName()}
-                </span>
+                                            style={uiAgentName ? { color: `var(${getAgentColor(uiAgentName).var})` } : undefined}
+                                        >
+                                            {getAgentDisplayName()}
+                                        </span>
             </button>
         );
     };

@@ -277,20 +277,18 @@ export const PierreDiffViewer: React.FC<PierreDiffViewerProps> = ({
     setSelection(null);
     setActiveMainTab('chat');
     
-    try {
-      await sendMessage(
-        message,
-        effectiveProviderId,
-        effectiveModelId,
-        sessionAgent,
-        undefined,
-        undefined,
-        undefined,
-        effectiveVariant
-      );
-    } catch (e) {
-      console.error("Failed to send comment", e);
-    }
+    void sendMessage(
+      message,
+      effectiveProviderId,
+      effectiveModelId,
+      sessionAgent,
+      undefined,
+      undefined,
+      undefined,
+      effectiveVariant
+    ).catch((e) => {
+      console.error('Failed to send comment', e);
+    });
   }, [selection, commentText, original, modified, fileName, language, sendMessage, currentSessionId, currentProviderId, currentModelId, currentAgentName, currentVariant, setActiveMainTab, getSessionAgentSelection, getAgentModelForSession, getAgentModelVariantForSession]);
 
   ensureFlexokiThemesRegistered();
@@ -484,19 +482,16 @@ export const PierreDiffViewer: React.FC<PierreDiffViewerProps> = ({
   }
 
   // Fallback for 'inline' layout: use Portal behavior
+  // Use simple div with overflow-x-auto to avoid nested ScrollableOverlay issues in Chrome
   return (
     <div className={cn("relative", "w-full")}>
-      <ScrollableOverlay
-        outerClassName="pierre-diff-wrapper w-full"
-        disableHorizontal={false}
-        fillContainer={false}
-      >
+      <div className="pierre-diff-wrapper w-full overflow-x-auto overflow-y-visible">
         <FileDiff
           fileDiff={fileDiff}
           options={options}
           selectedLines={selection}
         />
-      </ScrollableOverlay>
+      </div>
       
       {selection && createPortal(
         <div 

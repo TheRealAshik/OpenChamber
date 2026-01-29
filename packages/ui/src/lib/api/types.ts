@@ -367,7 +367,6 @@ export interface FilesAPI {
 }
 
 export interface WorktreeDefaults {
-  branchPrefix?: string;        // e.g. "feature", "bugfix" (no trailing slash)
   baseBranch?: string;          // e.g. "main", "develop", or "HEAD"
   autoCreateWorktree?: boolean; // future: skip dialog, create worktree automatically
 }
@@ -395,10 +394,22 @@ export interface SettingsPayload {
   securityScopedBookmarks?: string[];
   pinnedDirectories?: string[];
   showReasoningTraces?: boolean;
+  showTextJustificationActivity?: boolean;
+  nativeNotificationsEnabled?: boolean;
+  notificationMode?: 'always' | 'hidden-only';
   autoDeleteEnabled?: boolean;
   autoDeleteAfterDays?: number;
   queueModeEnabled?: boolean;
   gitmojiEnabled?: boolean;
+  toolCallExpansion?: 'collapsed' | 'activity' | 'detailed';
+  fontSize?: number;
+  padding?: number;
+  cornerRadius?: number;
+  inputBarOffset?: number;
+  diffLayoutPreference?: 'dynamic' | 'inline' | 'side-by-side';
+  diffViewMode?: 'single' | 'stacked';
+  directoryShowHidden?: boolean;
+  filesViewShowGitignored?: boolean;
 
   [key: string]: unknown;
 }
@@ -509,6 +520,31 @@ export type GitHubChecksSummary = {
   pending: number;
 };
 
+export type GitHubCheckRun = {
+  id?: number;
+  name: string;
+  app?: {
+    name?: string;
+    slug?: string;
+  };
+  status?: string;
+  conclusion?: string | null;
+  detailsUrl?: string;
+  output?: {
+    title?: string;
+    summary?: string;
+    text?: string;
+  };
+  job?: {
+    runId?: number;
+    jobId?: number;
+    url?: string;
+    name?: string;
+    conclusion?: string | null;
+    steps?: Array<{ name: string; status?: string; conclusion?: string | null; number?: number }>;
+  };
+};
+
 export type GitHubPullRequest = {
   number: number;
   title: string;
@@ -520,6 +556,63 @@ export type GitHubPullRequest = {
   headSha?: string;
   mergeable?: boolean | null;
   mergeableState?: string | null;
+};
+
+export type GitHubPullRequestHeadRepo = {
+  owner: string;
+  repo: string;
+  url: string;
+  cloneUrl?: string;
+};
+
+export type GitHubPullRequestSummary = GitHubPullRequest & {
+  author?: GitHubUserSummary | null;
+  body?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  headLabel?: string;
+  headRepo?: GitHubPullRequestHeadRepo | null;
+};
+
+export type GitHubPullRequestFile = {
+  filename: string;
+  status?: string;
+  additions?: number;
+  deletions?: number;
+  changes?: number;
+  patch?: string;
+};
+
+export type GitHubPullRequestReviewComment = {
+  id: number;
+  url: string;
+  body: string;
+  author?: GitHubUserSummary | null;
+  path?: string;
+  line?: number | null;
+  position?: number | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type GitHubPullRequestsListResult = {
+  connected: boolean;
+  repo?: GitHubRepoRef | null;
+  prs?: GitHubPullRequestSummary[];
+  page?: number;
+  hasMore?: boolean;
+};
+
+export type GitHubPullRequestContextResult = {
+  connected: boolean;
+  repo?: GitHubRepoRef | null;
+  pr?: GitHubPullRequestSummary | null;
+  issueComments?: GitHubIssueComment[];
+  reviewComments?: GitHubPullRequestReviewComment[];
+  files?: GitHubPullRequestFile[];
+  diff?: string;
+  checks?: GitHubChecksSummary | null;
+  checkRuns?: GitHubCheckRun[];
 };
 
 export type GitHubPullRequestStatus = {
@@ -560,10 +653,68 @@ export type GitHubPullRequestMergeResult = {
   message?: string;
 };
 
+export type GitHubIssueLabel = {
+  name: string;
+  color?: string;
+};
+
+export type GitHubIssueSummary = {
+  number: number;
+  title: string;
+  url: string;
+  state: 'open' | 'closed';
+  author?: GitHubUserSummary | null;
+  labels?: GitHubIssueLabel[];
+};
+
+export type GitHubIssue = GitHubIssueSummary & {
+  body?: string;
+  assignees?: GitHubUserSummary[];
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type GitHubIssueComment = {
+  id: number;
+  url: string;
+  body: string;
+  author?: GitHubUserSummary | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type GitHubIssuesListResult = {
+  connected: boolean;
+  repo?: GitHubRepoRef | null;
+  issues?: GitHubIssueSummary[];
+  page?: number;
+  hasMore?: boolean;
+};
+
+export type GitHubIssueGetResult = {
+  connected: boolean;
+  repo?: GitHubRepoRef | null;
+  issue?: GitHubIssue | null;
+};
+
+export type GitHubIssueCommentsResult = {
+  connected: boolean;
+  repo?: GitHubRepoRef | null;
+  comments?: GitHubIssueComment[];
+};
+
 export type GitHubAuthStatus = {
   connected: boolean;
   user?: GitHubUserSummary | null;
   scope?: string;
+  accounts?: GitHubAuthAccount[];
+};
+
+export type GitHubAuthAccount = {
+  id: string;
+  user: GitHubUserSummary;
+  scope?: string;
+  current?: boolean;
 };
 
 export type GitHubDeviceFlowStart = {
@@ -585,12 +736,24 @@ export interface GitHubAPI {
   authStart(): Promise<GitHubDeviceFlowStart>;
   authComplete(deviceCode: string): Promise<GitHubDeviceFlowComplete>;
   authDisconnect(): Promise<{ removed: boolean }>;
+  authActivate(accountId: string): Promise<GitHubAuthStatus>;
   me?(): Promise<GitHubUserSummary>;
 
   prStatus(directory: string, branch: string): Promise<GitHubPullRequestStatus>;
   prCreate(payload: GitHubPullRequestCreateInput): Promise<GitHubPullRequest>;
   prMerge(payload: GitHubPullRequestMergeInput): Promise<GitHubPullRequestMergeResult>;
   prReady(payload: GitHubPullRequestReadyInput): Promise<GitHubPullRequestReadyResult>;
+
+  prsList(directory: string, options?: { page?: number }): Promise<GitHubPullRequestsListResult>;
+  prContext(
+    directory: string,
+    number: number,
+    options?: { includeDiff?: boolean; includeCheckDetails?: boolean }
+  ): Promise<GitHubPullRequestContextResult>;
+
+  issuesList(directory: string, options?: { page?: number }): Promise<GitHubIssuesListResult>;
+  issueGet(directory: string, number: number): Promise<GitHubIssueGetResult>;
+  issueComments(directory: string, number: number): Promise<GitHubIssueCommentsResult>;
 }
 
 export interface RuntimeAPIs {
@@ -664,6 +827,14 @@ export interface SkillsCatalogResponse {
   ok: boolean;
   sources?: SkillsCatalogSource[];
   itemsBySource?: Record<SkillsCatalogSourceId, SkillsCatalogItem[]>;
+  pageInfoBySource?: Record<SkillsCatalogSourceId, { nextCursor?: string | null }>;
+  error?: { kind: string; message: string };
+}
+
+export interface SkillsCatalogSourceResponse {
+  ok: boolean;
+  items?: SkillsCatalogItem[];
+  nextCursor?: string | null;
   error?: { kind: string; message: string };
 }
 

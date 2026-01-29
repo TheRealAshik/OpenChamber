@@ -9,7 +9,6 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { useEventStream } from '@/hooks/useEventStream';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useMenuActions } from '@/hooks/useMenuActions';
-import { useMessageSync } from '@/hooks/useMessageSync';
 import { useSessionStatusBootstrap } from '@/hooks/useSessionStatusBootstrap';
 import { useSessionAutoCleanup } from '@/hooks/useSessionAutoCleanup';
 import { useRouter } from '@/hooks/useRouter';
@@ -29,6 +28,7 @@ import { registerRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { OnboardingScreen } from '@/components/onboarding/OnboardingScreen';
 import { isCliAvailable } from '@/lib/desktop';
 import { useUIStore } from '@/stores/useUIStore';
+import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import type { RuntimeAPIs } from '@/lib/api/types';
 
 const AboutDialogWrapper: React.FC = () => {
@@ -52,6 +52,7 @@ function App({ apis }: AppProps) {
   const isSwitchingDirectory = useDirectoryStore((state) => state.isSwitchingDirectory);
   const [showMemoryDebug, setShowMemoryDebug] = React.useState(false);
   const { uiFont, monoFont } = useFontPreferences();
+  const refreshGitHubAuthStatus = useGitHubAuthStore((state) => state.refreshStatus);
   const [isDesktopRuntime, setIsDesktopRuntime] = React.useState<boolean>(() => apis.runtime.isDesktop);
   const [isVSCodeRuntime, setIsVSCodeRuntime] = React.useState<boolean>(() => apis.runtime.isVSCode);
   const [cliAvailable, setCliAvailable] = React.useState<boolean>(() => {
@@ -68,6 +69,10 @@ function App({ apis }: AppProps) {
     registerRuntimeAPIs(apis);
     return () => registerRuntimeAPIs(null);
   }, [apis]);
+
+  React.useEffect(() => {
+    void refreshGitHubAuthStatus(apis.github, { force: true });
+  }, [apis.github, refreshGitHubAuthStatus]);
 
   React.useEffect(() => {
     if (typeof document === 'undefined') {
@@ -170,7 +175,7 @@ function App({ apis }: AppProps) {
 
   useMenuActions(handleToggleMemoryDebug);
 
-  useMessageSync();
+
 
   useSessionStatusBootstrap();
   useSessionAutoCleanup();
@@ -248,7 +253,7 @@ function App({ apis }: AppProps) {
       <RuntimeAPIProvider apis={apis}>
         <GitPollingProvider>
           <FireworksProvider>
-            <div className={`h-full text-foreground ${isDesktopRuntime ? 'bg-transparent' : 'bg-background'}`}>
+            <div className="h-full text-foreground bg-background">
               <MainLayout />
               <Toaster />
               <ConfigUpdateOverlay />

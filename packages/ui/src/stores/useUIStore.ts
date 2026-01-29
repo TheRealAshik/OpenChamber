@@ -4,7 +4,7 @@ import type { SidebarSection } from '@/constants/sidebar';
 import { getSafeStorage } from './utils/safeStorage';
 import { SEMANTIC_TYPOGRAPHY, getTypographyVariable, type SemanticTypographyKey } from '@/lib/typography';
 
-export type MainTab = 'chat' | 'git' | 'diff' | 'terminal' | 'files';
+export type MainTab = 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files';
 
 export type MainTabGuard = (nextTab: MainTab) => boolean;
 export type EventStreamStatus =
@@ -40,6 +40,7 @@ interface UIStore {
   eventStreamStatus: EventStreamStatus;
   eventStreamHint: string | null;
   showReasoningTraces: boolean;
+  showTextJustificationActivity: boolean;
   autoDeleteEnabled: boolean;
   autoDeleteAfterDays: number;
   autoDeleteLastRunAt: number | null;
@@ -87,6 +88,7 @@ interface UIStore {
   setSidebarSection: (section: SidebarSection) => void;
   setEventStreamStatus: (status: EventStreamStatus, hint?: string | null) => void;
   setShowReasoningTraces: (value: boolean) => void;
+  setShowTextJustificationActivity: (value: boolean) => void;
   setAutoDeleteEnabled: (value: boolean) => void;
   setAutoDeleteAfterDays: (days: number) => void;
   setAutoDeleteLastRunAt: (timestamp: number | null) => void;
@@ -143,7 +145,8 @@ export const useUIStore = create<UIStore>()(
         sidebarSection: 'sessions',
         eventStreamStatus: 'idle',
         eventStreamHint: null,
-        showReasoningTraces: false,
+        showReasoningTraces: true,
+        showTextJustificationActivity: false,
         autoDeleteEnabled: false,
         autoDeleteAfterDays: 30,
         autoDeleteLastRunAt: null,
@@ -157,10 +160,10 @@ export const useUIStore = create<UIStore>()(
         inputBarOffset: 0,
         favoriteModels: [],
         recentModels: [],
-        diffLayoutPreference: 'dynamic',
+        diffLayoutPreference: 'inline',
         diffFileLayout: {},
         diffWrapLines: false,
-        diffViewMode: 'single',
+        diffViewMode: 'stacked',
         isTimelineDialogOpen: false,
         nativeNotificationsEnabled: false,
         notificationMode: 'hidden-only',
@@ -290,6 +293,10 @@ export const useUIStore = create<UIStore>()(
 
         setShowReasoningTraces: (value) => {
           set({ showReasoningTraces: value });
+        },
+
+        setShowTextJustificationActivity: (value) => {
+          set({ showTextJustificationActivity: value });
         },
 
         setAutoDeleteEnabled: (value) => {
@@ -548,6 +555,7 @@ export const useUIStore = create<UIStore>()(
           isSessionCreateDialogOpen: state.isSessionCreateDialogOpen,
           isSettingsDialogOpen: state.isSettingsDialogOpen,
           showReasoningTraces: state.showReasoningTraces,
+          showTextJustificationActivity: state.showTextJustificationActivity,
           autoDeleteEnabled: state.autoDeleteEnabled,
           autoDeleteAfterDays: state.autoDeleteAfterDays,
           autoDeleteLastRunAt: state.autoDeleteLastRunAt,

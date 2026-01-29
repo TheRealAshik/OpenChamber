@@ -13,6 +13,8 @@ import { Button } from '@/components/ui/button';
 import { ButtonLarge } from '@/components/ui/button-large';
 import { CommitInput } from './CommitInput';
 import { AIHighlightsBox } from './AIHighlightsBox';
+import { useDeviceInfo } from '@/lib/device';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 type CommitAction = 'commit' | 'commitAndPush' | null;
 
@@ -51,6 +53,7 @@ export const CommitSection: React.FC<CommitSectionProps> = ({
 }) => {
   const hasSelectedFiles = selectedCount > 0;
   const canCommit = commitMessage.trim() && hasSelectedFiles && commitAction === null;
+  const { isMobile } = useDeviceInfo();
 
   return (
     <Collapsible
@@ -95,7 +98,7 @@ export const CommitSection: React.FC<CommitSectionProps> = ({
             </Button>
           )}
 
-          <div className="flex items-center gap-2">
+          <div className="@container/commit-actions flex items-center gap-2 min-w-0">
             <Button
               variant="outline"
               size="sm"
@@ -107,13 +110,15 @@ export const CommitSection: React.FC<CommitSectionProps> = ({
                 isBusy
               }
               type="button"
+              aria-label="Generate"
+              className="commit-actions__btn"
             >
               {isGeneratingMessage ? (
                 <RiLoader4Line className="size-4 animate-spin" />
               ) : (
                 <RiAiGenerate2 className="size-4 text-primary" />
               )}
-              Generate
+              <span className="commit-actions__label">Generate</span>
             </Button>
 
             <div className="flex-1" />
@@ -122,37 +127,65 @@ export const CommitSection: React.FC<CommitSectionProps> = ({
               variant="outline"
               onClick={onCommit}
               disabled={!canCommit || isGeneratingMessage}
+              className="commit-actions__btn whitespace-nowrap"
+              aria-label="Commit"
             >
               {commitAction === 'commit' ? (
                 <>
                   <RiLoader4Line className="size-4 animate-spin" />
-                  Committing...
+                  <span className="commit-actions__label">Committing...</span>
                 </>
               ) : (
                 <>
                   <RiGitCommitLine className="size-4" />
-                  Commit
+                  <span className="commit-actions__label">Commit</span>
                 </>
               )}
             </ButtonLarge>
 
-            <ButtonLarge
-              variant="default"
-              onClick={onCommitAndPush}
-              disabled={!canCommit || isGeneratingMessage}
-            >
-              {commitAction === 'commitAndPush' ? (
-                <>
-                  <RiLoader4Line className="size-4 animate-spin" />
-                  Pushing...
-                </>
-              ) : (
-                <>
-                  <RiArrowUpLine className="size-4" />
-                  Commit &amp; Push
-                </>
-              )}
-            </ButtonLarge>
+            {isMobile ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={onCommitAndPush}
+                    disabled={!canCommit || isGeneratingMessage}
+                    className="h-7 w-7 p-0"
+                    aria-label="Commit & Push"
+                  >
+                    {commitAction === 'commitAndPush' ? (
+                      <RiLoader4Line className="size-4 animate-spin" />
+                    ) : (
+                      <RiArrowUpLine className="size-4" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  <p>Commit & Push</p>
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <ButtonLarge
+                variant="default"
+                onClick={onCommitAndPush}
+                disabled={!canCommit || isGeneratingMessage}
+                className="commit-actions__btn"
+                aria-label="Commit & Push"
+              >
+                {commitAction === 'commitAndPush' ? (
+                  <>
+                    <RiLoader4Line className="size-4 animate-spin" />
+                    <span className="commit-actions__label commit-actions__label--long">Pushing...</span>
+                  </>
+                ) : (
+                  <>
+                    <RiArrowUpLine className="size-4" />
+                    <span className="commit-actions__label commit-actions__label--long">Commit &amp; Push</span>
+                  </>
+                )}
+              </ButtonLarge>
+            )}
           </div>
         </div>
       </CollapsibleContent>

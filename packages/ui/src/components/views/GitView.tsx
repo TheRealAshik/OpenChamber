@@ -4,8 +4,8 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useFireworksCelebration } from '@/contexts/FireworksContext';
 import type { GitIdentityProfile, CommitFileEntry } from '@/lib/api/types';
 import { useGitIdentitiesStore } from '@/stores/useGitIdentitiesStore';
-import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import {
   useGitStore,
   useGitStatus,
@@ -23,6 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+// (dropdown menu used inside IntegrateCommitsSection)
 import {
   Command,
   CommandEmpty,
@@ -31,9 +32,10 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command';
-import type { Session } from '@opencode-ai/sdk/v2';
+
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useUIStore } from '@/stores/useUIStore';
+import { IntegrateCommitsSection } from './git/IntegrateCommitsSection';
 
 import { GitHeader } from './git/GitHeader';
 import { GitEmptyState } from './git/GitEmptyState';
@@ -45,10 +47,12 @@ import { PullRequestSection } from './git/PullRequestSection';
 type SyncAction = 'fetch' | 'pull' | 'push' | null;
 type CommitAction = 'commit' | 'commitAndPush' | null;
 
+
 type GitViewSnapshot = {
   directory?: string;
   selectedPaths: string[];
   commitMessage: string;
+  generatedHighlights: string[];
 };
 
 type GitmojiEntry = {
@@ -179,23 +183,7 @@ const matchGitmojiFromSubject = (subject: string, gitmojis: GitmojiEntry[]): Git
   return null;
 };
 
-let gitViewSnapshot: GitViewSnapshot | null = null;
-
-const useEffectiveDirectory = () => {
-  const { currentSessionId, sessions, worktreeMetadata: worktreeMap } = useSessionStore();
-  const { currentDirectory: fallbackDirectory } = useDirectoryStore();
-
-  const worktreeMetadata = currentSessionId
-    ? worktreeMap.get(currentSessionId) ?? undefined
-    : undefined;
-  const currentSession = sessions.find((session) => session.id === currentSessionId);
-  type SessionWithDirectory = Session & { directory?: string };
-  const sessionDirectory: string | undefined = (
-    currentSession as SessionWithDirectory | undefined
-  )?.directory;
-
-  return worktreeMetadata?.path ?? sessionDirectory ?? fallbackDirectory ?? undefined;
-};
+const gitViewSnapshots = new Map<string, GitViewSnapshot>();
 
 export const GitView: React.FC = () => {
   const { git } = useRuntimeAPIs();
@@ -204,6 +192,7 @@ export const GitView: React.FC = () => {
   const worktreeMetadata = currentSessionId
     ? worktreeMap.get(currentSessionId) ?? undefined
     : undefined;
+
 
   const { profiles, globalIdentity, defaultGitIdentityId, loadProfiles, loadGlobalIdentity, loadDefaultGitIdentityId } =
     useGitIdentitiesStore();
@@ -226,9 +215,8 @@ export const GitView: React.FC = () => {
   } = useGitStore();
 
   const initialSnapshot = React.useMemo(() => {
-    if (!gitViewSnapshot) return null;
-    if (gitViewSnapshot.directory !== currentDirectory) return null;
-    return gitViewSnapshot;
+    if (!currentDirectory) return null;
+    return gitViewSnapshots.get(currentDirectory) ?? null;
   }, [currentDirectory]);
 
   const settingsGitmojiEnabled = useConfigStore((state) => state.settingsGitmojiEnabled);
@@ -272,8 +260,32 @@ export const GitView: React.FC = () => {
   );
   const [hasUserAdjustedSelection, setHasUserAdjustedSelection] = React.useState(false);
   const [revertingPaths, setRevertingPaths] = React.useState<Set<string>>(new Set());
+  const [integrateRefreshKey, setIntegrateRefreshKey] = React.useState(0);
   const [isGeneratingMessage, setIsGeneratingMessage] = React.useState(false);
-  const [generatedHighlights, setGeneratedHighlights] = React.useState<string[]>([]);
+  const [generatedHighlights, setGeneratedHighlights] = React.useState<string[]>(
+    initialSnapshot?.generatedHighlights ?? []
+  );
+
+  const repoRootForIntegrate = worktreeMetadata?.projectDirectory || null;
+  const sourceBranchForIntegrate = status?.current || null;
+  const shouldShowIntegrateCommits = React.useMemo(() => {
+    // For PR worktrees from forks we set upstream to a non-origin remote (e.g. pr-<owner>-<repo>).
+    // Re-integrate commits is intended for local scratch branches -> base branch, not fork PR branches.
+    const tracking = status?.tracking;
+    if (!tracking) return true;
+    return tracking.startsWith('origin/');
+  }, [status?.tracking]);
+  const defaultTargetBranch = React.useMemo(() => {
+    const fromMeta = worktreeMetadata?.createdFromBranch;
+    if (typeof fromMeta === 'string' && fromMeta.trim().length > 0) {
+      return fromMeta.trim();
+    }
+    const fromProject = activeProject?.worktreeDefaults?.baseBranch;
+    if (typeof fromProject === 'string' && fromProject.trim().length > 0) {
+      return fromProject.trim();
+    }
+    return 'main';
+  }, [worktreeMetadata?.createdFromBranch, activeProject?.worktreeDefaults?.baseBranch]);
   const clearGeneratedHighlights = React.useCallback(() => {
     setGeneratedHighlights([]);
   }, []);
@@ -346,19 +358,14 @@ export const GitView: React.FC = () => {
   }, [expandedCommitHashes, currentDirectory, git, commitFilesMap, loadingCommitHashes]);
 
   React.useEffect(() => {
-    return () => {
-      if (!currentDirectory) {
-        gitViewSnapshot = null;
-        return;
-      }
-
-      gitViewSnapshot = {
-        directory: currentDirectory,
-        selectedPaths: Array.from(selectedPaths),
-        commitMessage,
-      };
-    };
-  }, [commitMessage, currentDirectory, selectedPaths]);
+    if (!currentDirectory) return;
+    gitViewSnapshots.set(currentDirectory, {
+      directory: currentDirectory,
+      selectedPaths: Array.from(selectedPaths),
+      commitMessage,
+      generatedHighlights,
+    });
+  }, [commitMessage, currentDirectory, selectedPaths, generatedHighlights]);
 
   React.useEffect(() => {
     loadProfiles();
@@ -603,6 +610,7 @@ export const GitView: React.FC = () => {
       }
 
       await refreshLog();
+      setIntegrateRefreshKey((v) => v + 1);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create commit';
       toast.error(message);
@@ -1049,7 +1057,24 @@ export const GitView: React.FC = () => {
               )}
             </div>
 
-            {currentDirectory && status?.current ? (
+            {worktreeMetadata && repoRootForIntegrate && sourceBranchForIntegrate && shouldShowIntegrateCommits ? (
+              <IntegrateCommitsSection
+                repoRoot={repoRootForIntegrate}
+                sourceBranch={sourceBranchForIntegrate}
+                worktreeMetadata={worktreeMetadata}
+                localBranches={localBranches}
+                defaultTargetBranch={defaultTargetBranch}
+                refreshKey={integrateRefreshKey}
+                onRefresh={() => {
+                  if (!currentDirectory) return;
+                  fetchStatus(currentDirectory, git);
+                  fetchBranches(currentDirectory, git);
+                  fetchLog(currentDirectory, git, logMaxCountLocal);
+                }}
+              />
+            ) : null}
+
+            {currentDirectory && status?.current && status?.tracking ? (
               <PullRequestSection
                 directory={currentDirectory}
                 branch={status.current}

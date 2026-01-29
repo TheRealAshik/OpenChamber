@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
-import { RiArrowDownSLine, RiArrowRightSLine, RiBookLine, RiExternalLinkLine, RiFileEditLine, RiFileSearchLine, RiFileTextLine, RiFolder6Line, RiGitBranchLine, RiGlobalLine, RiListCheck3, RiMenuSearchLine, RiPencilLine, RiSurveyLine, RiTerminalBoxLine, RiToolsLine } from '@remixicon/react';
+import { RiArrowDownSLine, RiArrowRightSLine, RiBookLine, RiExternalLinkLine, RiFileEditLine, RiFileList2Line, RiFileSearchLine, RiFileTextLine, RiFolder6Line, RiGitBranchLine, RiGlobalLine, RiListCheck3, RiMenuSearchLine, RiPencilLine, RiSurveyLine, RiTaskLine, RiTerminalBoxLine, RiToolsLine } from '@remixicon/react';
 import { cn } from '@/lib/utils';
 import { SimpleMarkdownRenderer } from '../../MarkdownRenderer';
 import { getToolMetadata, getLanguageFromExtension, isImageFile, getImageMimeType } from '@/lib/toolHelpers';
@@ -87,6 +87,12 @@ export const getToolIcon = (toolName: string) => {
     }
     if (tool === 'question') {
         return <RiSurveyLine className={iconClass} />;
+    }
+    if (tool === 'plan_enter') {
+        return <RiFileList2Line className={iconClass} />;
+    }
+    if (tool === 'plan_exit') {
+        return <RiTaskLine className={iconClass} />;
     }
     if (tool.startsWith('git')) {
         return <RiGitBranchLine className={iconClass} />;
@@ -219,6 +225,14 @@ const getToolDescription = (part: ToolPartType, state: ToolStateUnion, isMobile:
 
     if (part.tool === 'skill' && input?.name && typeof input.name === 'string') {
         return input.name;
+    }
+
+    if (part.tool === 'plan_enter') {
+        return 'Switching to planning';
+    }
+
+    if (part.tool === 'plan_exit') {
+        return 'Switching to building';
     }
 
     const desc = input?.description || metadata?.description || ('title' in state && state.title) || '';
@@ -393,7 +407,7 @@ interface DiffPreviewProps {
     input?: ToolStateWithMetadata['input'];
 }
 
-const DiffPreview: React.FC<DiffPreviewProps> = ({ diff, syntaxTheme, input }) => (
+const DiffPreview: React.FC<DiffPreviewProps> = React.memo(({ diff, syntaxTheme, input }) => (
     <div className="typography-code px-1 pb-1 pt-0 space-y-0">
         {parseDiffToUnified(diff).map((hunk, hunkIdx) => (
             <div key={hunkIdx} className="-mx-1 px-1 border-b border-border/20 last:border-b-0">
@@ -454,7 +468,9 @@ const DiffPreview: React.FC<DiffPreviewProps> = ({ diff, syntaxTheme, input }) =
             </div>
         ))}
     </div>
-);
+));
+
+DiffPreview.displayName = 'DiffPreview';
 
 interface WriteInputPreviewProps {
     content: string;
@@ -463,9 +479,12 @@ interface WriteInputPreviewProps {
     displayPath: string;
 }
 
-const WriteInputPreview: React.FC<WriteInputPreviewProps> = ({ content, syntaxTheme, filePath, displayPath }) => {
-    const lines = content.split('\n');
-    const language = getLanguageFromExtension(filePath ?? '') || detectLanguageFromOutput(content, 'write', filePath ? { filePath } : undefined);
+const WriteInputPreview: React.FC<WriteInputPreviewProps> = React.memo(({ content, syntaxTheme, filePath, displayPath }) => {
+    const lines = React.useMemo(() => content.split('\n'), [content]);
+    const language = React.useMemo(
+        () => getLanguageFromExtension(filePath ?? '') || detectLanguageFromOutput(content, 'write', filePath ? { filePath } : undefined),
+        [content, filePath]
+    );
 
     const lineCount = Math.max(lines.length, 1);
     const headerLineLabel = lineCount === 1 ? 'line 1' : `lines 1-${lineCount}`;
@@ -512,7 +531,9 @@ const WriteInputPreview: React.FC<WriteInputPreviewProps> = ({ content, syntaxTh
             </div>
         </div>
     );
-};
+});
+
+WriteInputPreview.displayName = 'WriteInputPreview';
 
 interface ImagePreviewProps {
     content: string;
@@ -520,7 +541,7 @@ interface ImagePreviewProps {
     displayPath: string;
 }
 
-const ImagePreview: React.FC<ImagePreviewProps> = ({ content, filePath, displayPath }) => {
+const ImagePreview: React.FC<ImagePreviewProps> = React.memo(({ content, filePath, displayPath }) => {
     const mimeType = getImageMimeType(filePath);
     const isSvg = filePath.toLowerCase().endsWith('.svg');
 
@@ -552,7 +573,9 @@ const ImagePreview: React.FC<ImagePreviewProps> = ({ content, filePath, displayP
             </div>
         </div>
     );
-};
+});
+
+ImagePreview.displayName = 'ImagePreview';
 
 interface ToolExpandedContentProps {
     part: ToolPartType;
@@ -564,7 +587,7 @@ interface ToolExpandedContentProps {
     hasNextTool: boolean;
 }
 
-const ToolExpandedContent: React.FC<ToolExpandedContentProps> = ({
+const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
     part,
     state,
     syntaxTheme,
@@ -936,7 +959,9 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = ({
             )}
         </div>
     );
-};
+});
+
+ToolExpandedContent.displayName = 'ToolExpandedContent';
 
 const ToolPart: React.FC<ToolPartProps> = ({ part, isExpanded, onToggle, syntaxTheme, isMobile, onContentChange, hasPrevTool = false, hasNextTool = false }) => {
     const state = part.state;

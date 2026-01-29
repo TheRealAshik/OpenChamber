@@ -1,9 +1,8 @@
 import React from 'react';
 import { RiArrowDownSLine, RiArrowRightSLine, RiGitCommitLine, RiLoader4Line, RiTextWrap } from '@remixicon/react';
 
-import { useSessionStore } from '@/stores/useSessionStore';
-import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useGitStore, useGitStatus, useIsGitRepo, useGitFileCount } from '@/stores/useGitStore';
 import { cn } from '@/lib/utils';
 import type { GitStatus } from '@/lib/api/types';
@@ -29,6 +28,9 @@ import { useDeviceInfo } from '@/lib/device';
 // Minimum width for side-by-side diff view (px)
 const SIDE_BY_SIDE_MIN_WIDTH = 1100;
 const DIFF_REQUEST_TIMEOUT_MS = 15000;
+
+// Memory optimization: limit concurrent expanded diffs in stacked view
+const STACKED_VIEW_MAX_EXPANDED_DIFFS = 10;
 
 type FileEntry = GitStatus['files'][number] & {
     insertions: number;
@@ -454,7 +456,7 @@ const InlineDiffViewer = React.memo<InlineDiffViewerProps>(({
     );
 });
 
-// Single diff viewer instance - stays mounted
+// Single diff viewer instance
 interface SingleDiffViewerProps {
     filePath: string;
     diff: DiffData;
@@ -475,6 +477,11 @@ const SingleDiffViewer = React.memo<SingleDiffViewerProps>(({
         [filePath]
     );
 
+    // Don't render if not visible (memory optimization)
+    if (!isVisible) {
+        return null;
+    }
+
     // Check if this is an image file
     if (isImageFile(filePath)) {
         return (
@@ -484,23 +491,6 @@ const SingleDiffViewer = React.memo<SingleDiffViewerProps>(({
                 isVisible={isVisible}
                 renderSideBySide={renderSideBySide}
             />
-        );
-    }
-
-    // Use display:none for hidden diffs to exclude from layout calculations during resize
-    // This is faster for resize than visibility:hidden which keeps elements in layout flow
-    if (!isVisible) {
-        return (
-            <div className="absolute inset-0 hidden">
-                <PierreDiffViewer
-                    original={diff.original}
-                    modified={diff.modified}
-                    language={language}
-                    fileName={filePath}
-                    renderSideBySide={renderSideBySide}
-                    wrapLines={wrapLines}
-                />
-            </div>
         );
     }
 
@@ -566,6 +556,8 @@ interface MultiFileDiffEntryProps {
     isSelected: boolean;
     onSelect: (path: string) => void;
     registerSectionRef: (path: string, node: HTMLDivElement | null) => void;
+    /** Start collapsed to reduce memory with many files */
+    defaultCollapsed?: boolean;
 }
 
 const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
@@ -577,6 +569,7 @@ const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     isSelected,
     onSelect,
     registerSectionRef,
+    defaultCollapsed = false,
 }) => {
     const { git } = useRuntimeAPIs();
     const cachedDiff = useGitStore(
@@ -587,7 +580,7 @@ const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     const setDiff = useGitStore((state) => state.setDiff);
     const setDiffFileLayout = useUIStore((state) => state.setDiffFileLayout);
 
-    const [isExpanded, setIsExpanded] = React.useState(true);
+    const [isExpanded, setIsExpanded] = React.useState(!defaultCollapsed);
     const [hasBeenVisible, setHasBeenVisible] = React.useState(false);
     const [diffRetryNonce, setDiffRetryNonce] = React.useState(0);
     const [diffLoadError, setDiffLoadError] = React.useState<string | null>(null);
@@ -793,17 +786,6 @@ const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     );
 });
 
-const useEffectiveDirectory = () => {
-    const { currentSessionId, sessions, worktreeMetadata: worktreeMap } = useSessionStore();
-    const { currentDirectory: fallbackDirectory } = useDirectoryStore();
-
-    const worktreeMetadata = currentSessionId ? worktreeMap.get(currentSessionId) ?? undefined : undefined;
-    const currentSession = sessions.find((session) => session.id === currentSessionId);
-    const sessionDirectory = (currentSession as Record<string, unknown>)?.directory as string | undefined;
-
-    return worktreeMetadata?.path ?? sessionDirectory ?? fallbackDirectory ?? undefined;
-};
-
 export const DiffView: React.FC = () => {
     const { git } = useRuntimeAPIs();
     const effectiveDirectory = useEffectiveDirectory();
@@ -959,6 +941,7 @@ export const DiffView: React.FC = () => {
 
     const handleSelectFileAndScroll = React.useCallback((value: string) => {
         setSelectedFile(value);
+
         if (isStackedView && !scrollToFile(value)) {
             pendingScrollTargetRef.current = value;
         }
@@ -1052,27 +1035,27 @@ export const DiffView: React.FC = () => {
         };
     }, [effectiveDirectory, isStackedView, selectedFile, selectedCachedDiff, git, setDiff, diffRetryNonce]);
 
-    // Render all diff viewers - they stay mounted
-    const renderAllDiffViewers = () => {
-        if (!effectiveDirectory || changedFiles.length === 0) return null;
+    // Render only the selected diff viewer to prevent memory bloat with many files
+    const renderSelectedDiffViewer = () => {
+        if (!effectiveDirectory || !selectedFile) return null;
 
-        return changedFiles.map((file) => (
+        return (
             <DiffViewerEntry
-                key={file.path}
+                key={selectedFile}
                 directory={effectiveDirectory}
-                filePath={file.path}
-                isVisible={file.path === selectedFile}
+                filePath={selectedFile}
+                isVisible={true}
                 renderSideBySide={renderSideBySide}
                 wrapLines={diffWrapLines}
             />
-        ));
+        );
     };
 
     const renderStackedDiffView = () => {
         if (!effectiveDirectory) return null;
 
         return (
-            <div className="flex flex-1 min-h-0 gap-3 px-3 pb-3 pt-2">
+            <div className="flex flex-1 min-h-0 h-full gap-3 px-3 pb-3 pt-2">
                 {showFileSidebar && (
                     <section className="hidden lg:flex w-72 flex-col rounded-xl border border-border/60 bg-background/70 overflow-hidden">
                         <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/40">
@@ -1088,11 +1071,12 @@ export const DiffView: React.FC = () => {
                 )}
                 <ScrollableOverlay
                     ref={diffScrollRef}
-                    outerClassName="flex-1 min-h-0"
+                    outerClassName="flex-1 min-h-0 h-full"
                     className="pr-2"
+                    disableHorizontal
                 >
                     <div className="flex flex-col gap-3">
-                        {changedFiles.map((file) => (
+                        {changedFiles.map((file, index) => (
                             <MultiFileDiffEntry
                                 key={file.path}
                                 directory={effectiveDirectory}
@@ -1103,6 +1087,7 @@ export const DiffView: React.FC = () => {
                                 isSelected={file.path === selectedFile}
                                 onSelect={handleSelectFile}
                                 registerSectionRef={registerSectionRef}
+                                defaultCollapsed={index >= STACKED_VIEW_MAX_EXPANDED_DIFFS}
                             />
                         ))}
                     </div>
@@ -1152,7 +1137,7 @@ export const DiffView: React.FC = () => {
 
         return (
             <div className="flex flex-1 min-h-0 overflow-hidden px-3 py-3 relative">
-                {renderAllDiffViewers()}
+                {renderSelectedDiffViewer()}
                 {isCurrentFileLoading && !hasCurrentDiff && (
                     <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
                         {diffLoadError ? (
@@ -1245,13 +1230,7 @@ export const DiffView: React.FC = () => {
 // eslint-disable-next-line react-refresh/only-export-components
 export const useDiffFileCount = (): number => {
     const { git } = useRuntimeAPIs();
-    const { currentSessionId, sessions, worktreeMetadata: worktreeMap } = useSessionStore();
-    const { currentDirectory: fallbackDirectory } = useDirectoryStore();
-
-    const worktreeMetadata = currentSessionId ? worktreeMap.get(currentSessionId) ?? undefined : undefined;
-    const currentSession = sessions.find((session) => session.id === currentSessionId);
-    const sessionDirectory = (currentSession as Record<string, unknown>)?.directory as string | undefined;
-    const effectiveDirectory = worktreeMetadata?.path ?? sessionDirectory ?? fallbackDirectory ?? undefined;
+    const effectiveDirectory = useEffectiveDirectory();
 
     const { setActiveDirectory, fetchStatus } = useGitStore();
     const fileCount = useGitFileCount(effectiveDirectory ?? null);

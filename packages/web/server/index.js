@@ -64,6 +64,17 @@ const normalizeDirectoryPath = (value) => {
   return trimmed;
 };
 
+const OPENCHAMBER_USER_CONFIG_ROOT = path.join(os.homedir(), '.config', 'openchamber');
+
+const isPathWithinRoot = (resolvedPath, rootPath) => {
+  const resolvedRoot = path.resolve(rootPath || os.homedir());
+  const relative = path.relative(resolvedRoot, resolvedPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return false;
+  }
+  return true;
+};
+
 const resolveWorkspacePath = (targetPath, baseDirectory) => {
   const normalized = normalizeDirectoryPath(targetPath);
   if (!normalized || typeof normalized !== 'string') {
@@ -72,13 +83,18 @@ const resolveWorkspacePath = (targetPath, baseDirectory) => {
 
   const resolved = path.resolve(normalized);
   const resolvedBase = path.resolve(baseDirectory || os.homedir());
-  const relative = path.relative(resolvedBase, resolved);
 
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-    return { ok: false, error: 'Path is outside of active workspace' };
+  if (isPathWithinRoot(resolved, resolvedBase)) {
+    return { ok: true, base: resolvedBase, resolved };
   }
 
-  return { ok: true, base: resolvedBase, resolved };
+  // Allow writing OpenChamber per-project config under ~/.config/openchamber.
+  // LEGACY_PROJECT_CONFIG: migration target root; allowed outside workspace.
+  if (isPathWithinRoot(resolved, OPENCHAMBER_USER_CONFIG_ROOT)) {
+    return { ok: true, base: path.resolve(OPENCHAMBER_USER_CONFIG_ROOT), resolved };
+  }
+
+  return { ok: false, error: 'Path is outside of active workspace' };
 };
 
 const resolveWorkspacePathFromContext = async (req, targetPath) => {
@@ -533,6 +549,25 @@ const resolveProjectDirectory = async (req) => {
   return { directory: validated.directory, error: null };
 };
 
+const resolveOptionalProjectDirectory = async (req) => {
+  const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
+  const queryDirectory = Array.isArray(req.query?.directory)
+    ? req.query.directory[0]
+    : req.query?.directory;
+  const requested = headerDirectory || queryDirectory || null;
+
+  if (!requested) {
+    return { directory: null, error: null };
+  }
+
+  const validated = await validateDirectoryPath(requested);
+  if (!validated.ok) {
+    return { directory: null, error: validated.error };
+  }
+
+  return { directory: validated.directory, error: null };
+};
+
 const sanitizeTypographySizesPartial = (input) => {
   if (!input || typeof input !== 'object') {
     return undefined;
@@ -736,6 +771,18 @@ const sanitizeSettingsUpdate = (payload) => {
   if (typeof candidate.showReasoningTraces === 'boolean') {
     result.showReasoningTraces = candidate.showReasoningTraces;
   }
+  if (typeof candidate.showTextJustificationActivity === 'boolean') {
+    result.showTextJustificationActivity = candidate.showTextJustificationActivity;
+  }
+  if (typeof candidate.nativeNotificationsEnabled === 'boolean') {
+    result.nativeNotificationsEnabled = candidate.nativeNotificationsEnabled;
+  }
+  if (typeof candidate.notificationMode === 'string') {
+    const mode = candidate.notificationMode.trim();
+    if (mode === 'always' || mode === 'hidden-only') {
+      result.notificationMode = mode;
+    }
+  }
   if (typeof candidate.autoDeleteEnabled === 'boolean') {
     result.autoDeleteEnabled = candidate.autoDeleteEnabled;
   }
@@ -773,6 +820,42 @@ const sanitizeSettingsUpdate = (payload) => {
   }
   if (typeof candidate.gitmojiEnabled === 'boolean') {
     result.gitmojiEnabled = candidate.gitmojiEnabled;
+  }
+  if (typeof candidate.toolCallExpansion === 'string') {
+    const mode = candidate.toolCallExpansion.trim();
+    if (mode === 'collapsed' || mode === 'activity' || mode === 'detailed') {
+      result.toolCallExpansion = mode;
+    }
+  }
+  if (typeof candidate.fontSize === 'number' && Number.isFinite(candidate.fontSize)) {
+    result.fontSize = Math.max(50, Math.min(200, Math.round(candidate.fontSize)));
+  }
+  if (typeof candidate.padding === 'number' && Number.isFinite(candidate.padding)) {
+    result.padding = Math.max(50, Math.min(200, Math.round(candidate.padding)));
+  }
+  if (typeof candidate.cornerRadius === 'number' && Number.isFinite(candidate.cornerRadius)) {
+    result.cornerRadius = Math.max(0, Math.min(32, Math.round(candidate.cornerRadius)));
+  }
+  if (typeof candidate.inputBarOffset === 'number' && Number.isFinite(candidate.inputBarOffset)) {
+    result.inputBarOffset = Math.max(0, Math.min(100, Math.round(candidate.inputBarOffset)));
+  }
+  if (typeof candidate.diffLayoutPreference === 'string') {
+    const mode = candidate.diffLayoutPreference.trim();
+    if (mode === 'dynamic' || mode === 'inline' || mode === 'side-by-side') {
+      result.diffLayoutPreference = mode;
+    }
+  }
+  if (typeof candidate.diffViewMode === 'string') {
+    const mode = candidate.diffViewMode.trim();
+    if (mode === 'single' || mode === 'stacked') {
+      result.diffViewMode = mode;
+    }
+  }
+  if (typeof candidate.directoryShowHidden === 'boolean') {
+    result.directoryShowHidden = candidate.directoryShowHidden;
+  }
+  if (typeof candidate.filesViewShowGitignored === 'boolean') {
+    result.filesViewShowGitignored = candidate.filesViewShowGitignored;
   }
 
   // Memory limits for message viewport management
@@ -1193,6 +1276,61 @@ const isAnyUiVisible = () => globalVisibilityState === true;
 
 const isUiVisible = (token) => uiVisibilityByToken.get(token)?.visible === true;
 
+// Session activity tracking (mirrors desktop session_activity.rs)
+const sessionActivityPhases = new Map(); // sessionId -> { phase: 'idle'|'busy'|'cooldown', updatedAt: number }
+const sessionActivityCooldowns = new Map(); // sessionId -> timeoutId
+const SESSION_COOLDOWN_DURATION_MS = 2000;
+
+const setSessionActivityPhase = (sessionId, phase) => {
+  if (!sessionId || typeof sessionId !== 'string') return;
+  
+  // Cancel existing cooldown timer
+  const existingTimer = sessionActivityCooldowns.get(sessionId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    sessionActivityCooldowns.delete(sessionId);
+  }
+  
+  const current = sessionActivityPhases.get(sessionId);
+  if (current?.phase === phase) return; // No change
+  
+  sessionActivityPhases.set(sessionId, { phase, updatedAt: Date.now() });
+  
+  // Schedule transition from cooldown to idle
+  if (phase === 'cooldown') {
+    const timer = setTimeout(() => {
+      const now = sessionActivityPhases.get(sessionId);
+      if (now?.phase === 'cooldown') {
+        sessionActivityPhases.set(sessionId, { phase: 'idle', updatedAt: Date.now() });
+      }
+      sessionActivityCooldowns.delete(sessionId);
+    }, SESSION_COOLDOWN_DURATION_MS);
+    sessionActivityCooldowns.set(sessionId, timer);
+  }
+};
+
+const getSessionActivitySnapshot = () => {
+  const result = {};
+  for (const [sessionId, data] of sessionActivityPhases) {
+    result[sessionId] = { type: data.phase };
+  }
+  return result;
+};
+
+const resetAllSessionActivityToIdle = () => {
+  // Cancel all cooldown timers
+  for (const timer of sessionActivityCooldowns.values()) {
+    clearTimeout(timer);
+  }
+  sessionActivityCooldowns.clear();
+  
+  // Reset all phases to idle
+  const now = Date.now();
+  for (const [sessionId] of sessionActivityPhases) {
+    sessionActivityPhases.set(sessionId, { phase: 'idle', updatedAt: now });
+  }
+};
+
 const resolveVapidSubject = async () => {
   const configured = process.env.OPENCHAMBER_VAPID_SUBJECT;
   if (typeof configured === 'string' && configured.trim().length > 0) {
@@ -1425,6 +1563,11 @@ const startGlobalEventWatcher = async () => {
             buffer = buffer.slice(separatorIndex + 2);
             const payload = parseSseDataPayload(block);
             void maybeSendPushForTrigger(payload);
+            // Track session activity independently of UI (mirrors Tauri desktop behavior)
+            const activity = deriveSessionActivity(payload);
+            if (activity) {
+              setSessionActivityPhase(activity.sessionId, activity.phase);
+            }
           }
         }
       } catch (error) {
@@ -1813,10 +1956,21 @@ const maybeSendPushForTrigger = async (payload) => {
 
     const timer = setTimeout(() => {
       pushQuestionDebounceTimers.delete(sessionId);
+
+      const firstQuestion = payload.properties?.questions?.[0];
+      const header = typeof firstQuestion?.header === 'string' ? firstQuestion.header.trim() : '';
+      const questionText = typeof firstQuestion?.question === 'string' ? firstQuestion.question.trim() : '';
+      const title = /plan\s*mode/i.test(header)
+        ? 'Switch to plan mode'
+        : /build\s*agent/i.test(header)
+          ? 'Switch to build mode'
+          : header || 'Input needed';
+      const body = questionText || 'Agent is waiting for your response';
+
       void sendPushToAllUiSessions(
         {
-          title: 'Input needed',
-          body: 'Agent is waiting for your response',
+          title,
+          body,
           tag: `question-${sessionId}`,
           data: {
             url: buildSessionDeepLinkUrl(sessionId),
@@ -2302,6 +2456,7 @@ function setupProxy(app) {
       req.path.startsWith('/push') ||
       req.path.startsWith('/config/agents') ||
       req.path.startsWith('/config/settings') ||
+      req.path.startsWith('/config/skills') ||
       req.path === '/config/reload' ||
       req.path === '/health'
     ) {
@@ -2334,6 +2489,7 @@ function setupProxy(app) {
       req.path.startsWith('/themes/custom') ||
       req.path.startsWith('/config/agents') ||
       req.path.startsWith('/config/settings') ||
+      req.path.startsWith('/config/skills') ||
       req.path === '/health'
     ) {
       return next();
@@ -2431,19 +2587,24 @@ async function gracefulShutdown(options = {}) {
     clearInterval(healthCheckInterval);
   }
 
-  const portToKill = openCodePort;
+  // Only stop OpenCode if we started it ourselves (not when using external server)
+  if (!ENV_SKIP_OPENCODE_START) {
+    const portToKill = openCodePort;
 
-  if (openCodeProcess) {
-    console.log('Stopping OpenCode process...');
-    try {
-      openCodeProcess.close();
-    } catch (error) {
-      console.warn('Error closing OpenCode process:', error);
+    if (openCodeProcess) {
+      console.log('Stopping OpenCode process...');
+      try {
+        openCodeProcess.close();
+      } catch (error) {
+        console.warn('Error closing OpenCode process:', error);
+      }
+      openCodeProcess = null;
     }
-    openCodeProcess = null;
-  }
 
-  killProcessOnPort(portToKill);
+    killProcessOnPort(portToKill);
+  } else {
+    console.log('Skipping OpenCode shutdown (external server)');
+  }
 
   if (server) {
     await Promise.race([
@@ -2675,6 +2836,12 @@ async function main(options = {}) {
     });
   });
 
+  // Session activity status endpoint - returns tracked activity phases for all sessions
+  // Used by UI on visibility restore to get accurate status without waiting for SSE
+  app.get('/api/session-activity', (_req, res) => {
+    res.json(getSessionActivitySnapshot());
+  });
+
   app.get('/api/openchamber/update-check', async (_req, res) => {
     try {
       const { checkForUpdates } = await import('./lib/package-manager.js');
@@ -2896,6 +3063,7 @@ async function main(options = {}) {
       void maybeSendPushForTrigger(payload);
       const activity = deriveSessionActivity(payload);
       if (activity) {
+        setSessionActivityPhase(activity.sessionId, activity.phase);
         writeSseEvent(res, {
           type: 'openchamber:session-activity',
           properties: {
@@ -3016,6 +3184,7 @@ async function main(options = {}) {
       void maybeSendPushForTrigger(payload);
       const activity = deriveSessionActivity(payload);
       if (activity) {
+        setSessionActivityPhase(activity.sessionId, activity.phase);
         writeSseEvent(res, {
           type: 'openchamber:session-activity',
           properties: {
@@ -3381,7 +3550,7 @@ async function main(options = {}) {
   const { parseSkillRepoSource } = await import('./lib/skills-catalog/source.js');
   const { scanSkillsRepository } = await import('./lib/skills-catalog/scan.js');
   const { installSkillsFromRepository } = await import('./lib/skills-catalog/install.js');
-  const { scanClawdHub, installSkillsFromClawdHub, isClawdHubSource } = await import('./lib/skills-catalog/clawdhub/index.js');
+  const { scanClawdHubPage, installSkillsFromClawdHub, isClawdHubSource } = await import('./lib/skills-catalog/clawdhub/index.js');
   const { getProfiles, getProfile } = await import('./lib/git-identity-storage.js');
 
   const listGitIdentitiesForResponse = () => {
@@ -3411,11 +3580,10 @@ async function main(options = {}) {
 
   app.get('/api/config/skills/catalog', async (req, res) => {
     try {
-      const { directory, error } = await resolveProjectDirectory(req);
-      if (!directory) {
+      const { error } = await resolveOptionalProjectDirectory(req);
+      if (error) {
         return res.status(400).json({ error });
       }
-      const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
 
       const curatedSources = getCuratedSkillsSources();
       const settings = await readSettingsFromDisk();
@@ -3431,95 +3599,121 @@ async function main(options = {}) {
       }));
 
       const sources = [...curatedSources, ...customSources];
+      const sourcesForUi = sources.map(({ gitIdentityId, ...rest }) => rest);
 
-      const discovered = discoverSkills(directory);
+      res.json({ ok: true, sources: sourcesForUi, itemsBySource: {}, pageInfoBySource: {} });
+    } catch (error) {
+      console.error('Failed to load skills catalog:', error);
+      res.status(500).json({ ok: false, error: { kind: 'unknown', message: error.message || 'Failed to load catalog' } });
+    }
+  });
+
+  app.get('/api/config/skills/catalog/source', async (req, res) => {
+    try {
+      const { directory, error } = await resolveOptionalProjectDirectory(req);
+      if (error) {
+        return res.status(400).json({ ok: false, error: { kind: 'invalidSource', message: error } });
+      }
+
+      const sourceId = typeof req.query.sourceId === 'string' ? req.query.sourceId : null;
+      if (!sourceId) {
+        return res.status(400).json({ ok: false, error: { kind: 'invalidSource', message: 'Missing sourceId' } });
+      }
+
+      const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
+      const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : null;
+
+      const curatedSources = getCuratedSkillsSources();
+      const settings = await readSettingsFromDisk();
+      const customSourcesRaw = sanitizeSkillCatalogs(settings.skillCatalogs) || [];
+
+      const customSources = customSourcesRaw.map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        description: entry.source,
+        source: entry.source,
+        defaultSubpath: entry.subpath,
+        gitIdentityId: entry.gitIdentityId,
+      }));
+
+      const sources = [...curatedSources, ...customSources];
+      const src = sources.find((entry) => entry.id === sourceId);
+
+      if (!src) {
+        return res.status(404).json({ ok: false, error: { kind: 'invalidSource', message: 'Unknown source' } });
+      }
+
+      const discovered = directory ? discoverSkills(directory) : [];
       const installedByName = new Map(discovered.map((s) => [s.name, s]));
 
-      const itemsBySource = {};
-
-      for (const src of sources) {
-        // Handle ClawdHub sources separately (API-based, not git-based)
-        if (src.sourceType === 'clawdhub' || isClawdHubSource(src.source)) {
-          const cacheKey = 'clawdhub:registry';
-          let scanResult = !refresh ? getCachedScan(cacheKey) : null;
-
-          if (!scanResult) {
-            const scanned = await scanClawdHub();
-            if (!scanned.ok) {
-              itemsBySource[src.id] = [];
-              continue;
-            }
-            scanResult = scanned;
-            setCachedScan(cacheKey, scanResult);
-          }
-
-          const items = (scanResult.items || []).map((item) => {
-            const installed = installedByName.get(item.skillName);
-            return {
-              ...item,
-              sourceId: src.id,
-              installed: installed
-                ? { isInstalled: true, scope: installed.scope }
-                : { isInstalled: false },
-            };
-          });
-
-          itemsBySource[src.id] = items;
-          continue;
+      if (src.sourceType === 'clawdhub' || isClawdHubSource(src.source)) {
+        const scanned = await scanClawdHubPage({ cursor: cursor || null });
+        if (!scanned.ok) {
+          return res.status(500).json({ ok: false, error: scanned.error });
         }
 
-        // Handle GitHub sources (git clone based)
-        const parsed = parseSkillRepoSource(src.source);
-        if (!parsed.ok) {
-          itemsBySource[src.id] = [];
-          continue;
-        }
-
-        const effectiveSubpath = src.defaultSubpath || parsed.effectiveSubpath || null;
-        const cacheKey = getCacheKey({
-          normalizedRepo: parsed.normalizedRepo,
-          subpath: effectiveSubpath || '',
-          identityId: src.gitIdentityId || '',
-        });
-
-        let scanResult = !refresh ? getCachedScan(cacheKey) : null;
-        if (!scanResult) {
-          const scanned = await scanSkillsRepository({
-            source: src.source,
-            subpath: src.defaultSubpath,
-            defaultSubpath: src.defaultSubpath,
-            identity: resolveGitIdentity(src.gitIdentityId),
-          });
-
-          if (!scanned.ok) {
-            itemsBySource[src.id] = [];
-            continue;
-          }
-
-          scanResult = scanned;
-          setCachedScan(cacheKey, scanResult);
-        }
-
-        const items = (scanResult.items || []).map((item) => {
+        const items = (scanned.items || []).map((item) => {
           const installed = installedByName.get(item.skillName);
           return {
-            sourceId: src.id,
             ...item,
-            gitIdentityId: src.gitIdentityId,
+            sourceId: src.id,
             installed: installed
               ? { isInstalled: true, scope: installed.scope }
               : { isInstalled: false },
           };
         });
 
-        itemsBySource[src.id] = items;
+        return res.json({ ok: true, items, nextCursor: scanned.nextCursor || null });
       }
 
-      const sourcesForUi = sources.map(({ gitIdentityId, ...rest }) => rest);
-      res.json({ ok: true, sources: sourcesForUi, itemsBySource });
+      const parsed = parseSkillRepoSource(src.source);
+      if (!parsed.ok) {
+        return res.status(400).json({ ok: false, error: parsed.error });
+      }
+
+      const effectiveSubpath = src.defaultSubpath || parsed.effectiveSubpath || null;
+      const cacheKey = getCacheKey({
+        normalizedRepo: parsed.normalizedRepo,
+        subpath: effectiveSubpath || '',
+        identityId: src.gitIdentityId || '',
+      });
+
+      let scanResult = !refresh ? getCachedScan(cacheKey) : null;
+      if (!scanResult) {
+        const scanned = await scanSkillsRepository({
+          source: src.source,
+          subpath: src.defaultSubpath,
+          defaultSubpath: src.defaultSubpath,
+          identity: resolveGitIdentity(src.gitIdentityId),
+        });
+
+        if (!scanned.ok) {
+          return res.status(500).json({ ok: false, error: scanned.error });
+        }
+
+        scanResult = scanned;
+        setCachedScan(cacheKey, scanResult);
+      }
+
+      const items = (scanResult.items || []).map((item) => {
+        const installed = installedByName.get(item.skillName);
+        return {
+          sourceId: src.id,
+          ...item,
+          gitIdentityId: src.gitIdentityId,
+          installed: installed
+            ? { isInstalled: true, scope: installed.scope }
+            : { isInstalled: false },
+        };
+      });
+
+      return res.json({ ok: true, items });
     } catch (error) {
-      console.error('Failed to load skills catalog:', error);
-      res.status(500).json({ ok: false, error: { kind: 'unknown', message: error.message || 'Failed to load catalog' } });
+      console.error('Failed to load catalog source:', error);
+      return res.status(500).json({
+        ok: false,
+        error: { kind: 'unknown', message: error.message || 'Failed to load catalog source' },
+      });
     }
   });
 
@@ -3895,15 +4089,16 @@ async function main(options = {}) {
 
   app.get('/api/github/auth/status', async (_req, res) => {
     try {
-      const { getGitHubAuth, getOctokitOrNull, clearGitHubAuth } = await getGitHubLibraries();
+      const { getGitHubAuth, getOctokitOrNull, clearGitHubAuth, getGitHubAuthAccounts } = await getGitHubLibraries();
       const auth = getGitHubAuth();
+      const accounts = getGitHubAuthAccounts();
       if (!auth?.accessToken) {
-        return res.json({ connected: false });
+        return res.json({ connected: false, accounts });
       }
 
       const octokit = getOctokitOrNull();
       if (!octokit) {
-        return res.json({ connected: false });
+        return res.json({ connected: false, accounts });
       }
 
       let user = null;
@@ -3912,7 +4107,7 @@ async function main(options = {}) {
       } catch (error) {
         if (error?.status === 401) {
           clearGitHubAuth();
-          return res.json({ connected: false });
+          return res.json({ connected: false, accounts: getGitHubAuthAccounts() });
         }
       }
 
@@ -3923,6 +4118,7 @@ async function main(options = {}) {
         connected: true,
         user: mergedUser,
         scope: auth.scope,
+        accounts,
       });
     } catch (error) {
       console.error('Failed to get GitHub auth status:', error);
@@ -3964,7 +4160,7 @@ async function main(options = {}) {
 
   app.post('/api/github/auth/complete', async (req, res) => {
     try {
-      const { getGitHubClientId, exchangeDeviceCode, setGitHubAuth } = await getGitHubLibraries();
+      const { getGitHubClientId, exchangeDeviceCode, setGitHubAuth, getGitHubAuthAccounts } = await getGitHubLibraries();
       const clientId = getGitHubClientId();
       if (!clientId) {
         return res.status(400).json({
@@ -4010,10 +4206,56 @@ async function main(options = {}) {
         connected: true,
         user,
         scope: typeof payload.scope === 'string' ? payload.scope : '',
+        accounts: getGitHubAuthAccounts(),
       });
     } catch (error) {
       console.error('Failed to complete GitHub device flow:', error);
       return res.status(500).json({ error: error.message || 'Failed to complete GitHub device flow' });
+    }
+  });
+
+  app.post('/api/github/auth/activate', async (req, res) => {
+    try {
+      const { activateGitHubAuth, getGitHubAuth, getOctokitOrNull, clearGitHubAuth, getGitHubAuthAccounts } = await getGitHubLibraries();
+      const accountId = typeof req.body?.accountId === 'string' ? req.body.accountId : '';
+      if (!accountId) {
+        return res.status(400).json({ error: 'accountId is required' });
+      }
+      const activated = activateGitHubAuth(accountId);
+      if (!activated) {
+        return res.status(404).json({ error: 'GitHub account not found' });
+      }
+
+      const auth = getGitHubAuth();
+      const accounts = getGitHubAuthAccounts();
+      if (!auth?.accessToken) {
+        return res.json({ connected: false, accounts });
+      }
+
+      const octokit = getOctokitOrNull();
+      if (!octokit) {
+        return res.json({ connected: false, accounts });
+      }
+
+      let user = auth.user || null;
+      try {
+        user = await getGitHubUserSummary(octokit);
+      } catch (error) {
+        if (error?.status === 401) {
+          clearGitHubAuth();
+          return res.json({ connected: false, accounts: getGitHubAuthAccounts() });
+        }
+      }
+
+      return res.json({
+        connected: true,
+        user,
+        scope: auth.scope,
+        accounts,
+      });
+    } catch (error) {
+      console.error('Failed to activate GitHub account:', error);
+      return res.status(500).json({ error: error.message || 'Failed to activate GitHub account' });
     }
   });
 
@@ -4082,7 +4324,23 @@ async function main(options = {}) {
         head: `${repo.owner}:${branch}`,
         per_page: 10,
       });
-      const first = Array.isArray(list?.data) ? list.data[0] : null;
+
+      let first = Array.isArray(list?.data) ? list.data[0] : null;
+
+      // Fork PR support: head owner != base owner. If no PR found via head filter,
+      // fall back to listing open PRs and matching by head ref name.
+      if (!first) {
+        const openList = await octokit.rest.pulls.list({
+          owner: repo.owner,
+          repo: repo.repo,
+          state: 'open',
+          per_page: 100,
+        });
+        const matches = Array.isArray(openList?.data)
+          ? openList.data.filter((pr) => pr?.head?.ref === branch)
+          : [];
+        first = matches[0] ?? null;
+      }
       if (!first) {
         return res.json({ connected: true, repo, branch, pr: null, checks: null, canMerge: false });
       }
@@ -4357,6 +4615,528 @@ async function main(options = {}) {
     } catch (error) {
       console.error('Failed to mark PR ready:', error);
       return res.status(500).json({ error: error.message || 'Failed to mark PR ready' });
+    }
+  });
+
+  // ================= GitHub Issue APIs =================
+
+  app.get('/api/github/issues/list', async (req, res) => {
+    try {
+      const directory = typeof req.query?.directory === 'string' ? req.query.directory.trim() : '';
+      const page = typeof req.query?.page === 'string' ? Number(req.query.page) : 1;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory is required' });
+      }
+
+      const { getOctokitOrNull } = await getGitHubLibraries();
+      const octokit = getOctokitOrNull();
+      if (!octokit) {
+        return res.json({ connected: false });
+      }
+
+      const { resolveGitHubRepoFromDirectory } = await import('./lib/github-repo.js');
+      const { repo } = await resolveGitHubRepoFromDirectory(directory);
+      if (!repo) {
+        return res.json({ connected: true, repo: null, issues: [] });
+      }
+
+      const list = await octokit.rest.issues.listForRepo({
+        owner: repo.owner,
+        repo: repo.repo,
+        state: 'open',
+        per_page: 50,
+        page: Number.isFinite(page) && page > 0 ? page : 1,
+      });
+      const link = typeof list?.headers?.link === 'string' ? list.headers.link : '';
+      const hasMore = /rel="next"/.test(link);
+      const issues = (Array.isArray(list?.data) ? list.data : [])
+        .filter((item) => !item?.pull_request)
+        .map((item) => ({
+          number: item.number,
+          title: item.title,
+          url: item.html_url,
+          state: item.state === 'closed' ? 'closed' : 'open',
+          author: item.user ? { login: item.user.login, id: item.user.id, avatarUrl: item.user.avatar_url } : null,
+          labels: Array.isArray(item.labels)
+            ? item.labels
+                .map((label) => {
+                  if (typeof label === 'string') return null;
+                  const name = typeof label?.name === 'string' ? label.name : '';
+                  if (!name) return null;
+                  return { name, color: typeof label?.color === 'string' ? label.color : undefined };
+                })
+                .filter(Boolean)
+            : [],
+        }));
+
+      return res.json({ connected: true, repo, issues, page: Number.isFinite(page) && page > 0 ? page : 1, hasMore });
+    } catch (error) {
+      console.error('Failed to list GitHub issues:', error);
+      return res.status(500).json({ error: error.message || 'Failed to list GitHub issues' });
+    }
+  });
+
+  app.get('/api/github/issues/get', async (req, res) => {
+    try {
+      const directory = typeof req.query?.directory === 'string' ? req.query.directory.trim() : '';
+      const number = typeof req.query?.number === 'string' ? Number(req.query.number) : null;
+      if (!directory || !number) {
+        return res.status(400).json({ error: 'directory and number are required' });
+      }
+
+      const { getOctokitOrNull } = await getGitHubLibraries();
+      const octokit = getOctokitOrNull();
+      if (!octokit) {
+        return res.json({ connected: false });
+      }
+
+      const { resolveGitHubRepoFromDirectory } = await import('./lib/github-repo.js');
+      const { repo } = await resolveGitHubRepoFromDirectory(directory);
+      if (!repo) {
+        return res.json({ connected: true, repo: null, issue: null });
+      }
+
+      const result = await octokit.rest.issues.get({ owner: repo.owner, repo: repo.repo, issue_number: number });
+      const issue = result?.data;
+      if (!issue || issue.pull_request) {
+        return res.status(400).json({ error: 'Not a GitHub issue' });
+      }
+
+      return res.json({
+        connected: true,
+        repo,
+        issue: {
+          number: issue.number,
+          title: issue.title,
+          url: issue.html_url,
+          state: issue.state === 'closed' ? 'closed' : 'open',
+          body: issue.body || '',
+          createdAt: issue.created_at,
+          updatedAt: issue.updated_at,
+          author: issue.user ? { login: issue.user.login, id: issue.user.id, avatarUrl: issue.user.avatar_url } : null,
+          assignees: Array.isArray(issue.assignees)
+            ? issue.assignees
+                .map((u) => (u ? { login: u.login, id: u.id, avatarUrl: u.avatar_url } : null))
+                .filter(Boolean)
+            : [],
+          labels: Array.isArray(issue.labels)
+            ? issue.labels
+                .map((label) => {
+                  if (typeof label === 'string') return null;
+                  const name = typeof label?.name === 'string' ? label.name : '';
+                  if (!name) return null;
+                  return { name, color: typeof label?.color === 'string' ? label.color : undefined };
+                })
+                .filter(Boolean)
+            : [],
+        },
+      });
+    } catch (error) {
+      console.error('Failed to fetch GitHub issue:', error);
+      return res.status(500).json({ error: error.message || 'Failed to fetch GitHub issue' });
+    }
+  });
+
+  app.get('/api/github/issues/comments', async (req, res) => {
+    try {
+      const directory = typeof req.query?.directory === 'string' ? req.query.directory.trim() : '';
+      const number = typeof req.query?.number === 'string' ? Number(req.query.number) : null;
+      if (!directory || !number) {
+        return res.status(400).json({ error: 'directory and number are required' });
+      }
+
+      const { getOctokitOrNull } = await getGitHubLibraries();
+      const octokit = getOctokitOrNull();
+      if (!octokit) {
+        return res.json({ connected: false });
+      }
+
+      const { resolveGitHubRepoFromDirectory } = await import('./lib/github-repo.js');
+      const { repo } = await resolveGitHubRepoFromDirectory(directory);
+      if (!repo) {
+        return res.json({ connected: true, repo: null, comments: [] });
+      }
+
+      const result = await octokit.rest.issues.listComments({
+        owner: repo.owner,
+        repo: repo.repo,
+        issue_number: number,
+        per_page: 100,
+      });
+      const comments = (Array.isArray(result?.data) ? result.data : [])
+        .map((comment) => ({
+          id: comment.id,
+          url: comment.html_url,
+          body: comment.body || '',
+          createdAt: comment.created_at,
+          updatedAt: comment.updated_at,
+          author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
+        }));
+
+      return res.json({ connected: true, repo, comments });
+    } catch (error) {
+      console.error('Failed to fetch GitHub issue comments:', error);
+      return res.status(500).json({ error: error.message || 'Failed to fetch GitHub issue comments' });
+    }
+  });
+
+  // ================= GitHub Pull Request Context APIs =================
+
+  app.get('/api/github/pulls/list', async (req, res) => {
+    try {
+      const directory = typeof req.query?.directory === 'string' ? req.query.directory.trim() : '';
+      const page = typeof req.query?.page === 'string' ? Number(req.query.page) : 1;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory is required' });
+      }
+
+      const { getOctokitOrNull } = await getGitHubLibraries();
+      const octokit = getOctokitOrNull();
+      if (!octokit) {
+        return res.json({ connected: false });
+      }
+
+      const { resolveGitHubRepoFromDirectory } = await import('./lib/github-repo.js');
+      const { repo } = await resolveGitHubRepoFromDirectory(directory);
+      if (!repo) {
+        return res.json({ connected: true, repo: null, prs: [] });
+      }
+
+      const list = await octokit.rest.pulls.list({
+        owner: repo.owner,
+        repo: repo.repo,
+        state: 'open',
+        per_page: 50,
+        page: Number.isFinite(page) && page > 0 ? page : 1,
+      });
+
+      const link = typeof list?.headers?.link === 'string' ? list.headers.link : '';
+      const hasMore = /rel="next"/.test(link);
+
+      const prs = (Array.isArray(list?.data) ? list.data : []).map((pr) => {
+        const mergedState = pr.merged_at ? 'merged' : (pr.state === 'closed' ? 'closed' : 'open');
+        const headRepo = pr.head?.repo
+          ? {
+              owner: pr.head.repo.owner?.login,
+              repo: pr.head.repo.name,
+              url: pr.head.repo.html_url,
+              cloneUrl: pr.head.repo.clone_url,
+            }
+          : null;
+        return {
+          number: pr.number,
+          title: pr.title,
+          url: pr.html_url,
+          state: mergedState,
+          draft: Boolean(pr.draft),
+          base: pr.base?.ref,
+          head: pr.head?.ref,
+          headSha: pr.head?.sha,
+          mergeable: pr.mergeable,
+          mergeableState: pr.mergeable_state,
+          author: pr.user ? { login: pr.user.login, id: pr.user.id, avatarUrl: pr.user.avatar_url } : null,
+          headLabel: pr.head?.label,
+          headRepo: headRepo && headRepo.owner && headRepo.repo && headRepo.url
+            ? headRepo
+            : null,
+        };
+      });
+
+      return res.json({ connected: true, repo, prs, page: Number.isFinite(page) && page > 0 ? page : 1, hasMore });
+    } catch (error) {
+      if (error?.status === 401) {
+        const { clearGitHubAuth } = await getGitHubLibraries();
+        clearGitHubAuth();
+        return res.json({ connected: false });
+      }
+      console.error('Failed to list GitHub PRs:', error);
+      return res.status(500).json({ error: error.message || 'Failed to list GitHub PRs' });
+    }
+  });
+
+  app.get('/api/github/pulls/context', async (req, res) => {
+    try {
+      const directory = typeof req.query?.directory === 'string' ? req.query.directory.trim() : '';
+      const number = typeof req.query?.number === 'string' ? Number(req.query.number) : null;
+      const includeDiff = req.query?.diff === '1' || req.query?.diff === 'true';
+      const includeCheckDetails = req.query?.checkDetails === '1' || req.query?.checkDetails === 'true';
+      if (!directory || !number) {
+        return res.status(400).json({ error: 'directory and number are required' });
+      }
+
+      const { getOctokitOrNull } = await getGitHubLibraries();
+      const octokit = getOctokitOrNull();
+      if (!octokit) {
+        return res.json({ connected: false });
+      }
+
+      const { resolveGitHubRepoFromDirectory } = await import('./lib/github-repo.js');
+      const { repo } = await resolveGitHubRepoFromDirectory(directory);
+      if (!repo) {
+        return res.json({ connected: true, repo: null, pr: null });
+      }
+
+      const prResp = await octokit.rest.pulls.get({ owner: repo.owner, repo: repo.repo, pull_number: number });
+      const prData = prResp?.data;
+      if (!prData) {
+        return res.status(404).json({ error: 'PR not found' });
+      }
+
+      const headRepo = prData.head?.repo
+        ? {
+            owner: prData.head.repo.owner?.login,
+            repo: prData.head.repo.name,
+            url: prData.head.repo.html_url,
+            cloneUrl: prData.head.repo.clone_url,
+          }
+        : null;
+
+      const mergedState = prData.merged ? 'merged' : (prData.state === 'closed' ? 'closed' : 'open');
+      const pr = {
+        number: prData.number,
+        title: prData.title,
+        url: prData.html_url,
+        state: mergedState,
+        draft: Boolean(prData.draft),
+        base: prData.base?.ref,
+        head: prData.head?.ref,
+        headSha: prData.head?.sha,
+        mergeable: prData.mergeable,
+        mergeableState: prData.mergeable_state,
+        author: prData.user ? { login: prData.user.login, id: prData.user.id, avatarUrl: prData.user.avatar_url } : null,
+        headLabel: prData.head?.label,
+        headRepo: headRepo && headRepo.owner && headRepo.repo && headRepo.url ? headRepo : null,
+        body: prData.body || '',
+        createdAt: prData.created_at,
+        updatedAt: prData.updated_at,
+      };
+
+      const issueCommentsResp = await octokit.rest.issues.listComments({
+        owner: repo.owner,
+        repo: repo.repo,
+        issue_number: number,
+        per_page: 100,
+      });
+      const issueComments = (Array.isArray(issueCommentsResp?.data) ? issueCommentsResp.data : []).map((comment) => ({
+        id: comment.id,
+        url: comment.html_url,
+        body: comment.body || '',
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+        author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
+      }));
+
+      const reviewCommentsResp = await octokit.rest.pulls.listReviewComments({
+        owner: repo.owner,
+        repo: repo.repo,
+        pull_number: number,
+        per_page: 100,
+      });
+      const reviewComments = (Array.isArray(reviewCommentsResp?.data) ? reviewCommentsResp.data : []).map((comment) => ({
+        id: comment.id,
+        url: comment.html_url,
+        body: comment.body || '',
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+        path: comment.path,
+        line: typeof comment.line === 'number' ? comment.line : null,
+        position: typeof comment.position === 'number' ? comment.position : null,
+        author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
+      }));
+
+      const filesResp = await octokit.rest.pulls.listFiles({
+        owner: repo.owner,
+        repo: repo.repo,
+        pull_number: number,
+        per_page: 100,
+      });
+      const files = (Array.isArray(filesResp?.data) ? filesResp.data : []).map((f) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+        changes: f.changes,
+        patch: f.patch,
+      }));
+
+      // checks summary (same logic as status endpoint)
+      let checks = null;
+      let checkRunsOut = undefined;
+      const sha = prData.head?.sha;
+      if (sha) {
+        try {
+          const runs = await octokit.rest.checks.listForRef({ owner: repo.owner, repo: repo.repo, ref: sha, per_page: 100 });
+          const checkRuns = Array.isArray(runs?.data?.check_runs) ? runs.data.check_runs : [];
+          if (checkRuns.length > 0) {
+            const parsedJobs = new Map();
+            if (includeCheckDetails) {
+              // Prefetch actions jobs per runId.
+              const runIds = new Set();
+              const jobIds = new Map();
+              for (const run of checkRuns) {
+                const details = typeof run.details_url === 'string' ? run.details_url : '';
+                const match = details.match(/\/actions\/runs\/(\d+)(?:\/job\/(\d+))?/);
+                if (match) {
+                  const runId = Number(match[1]);
+                  const jobId = match[2] ? Number(match[2]) : null;
+                  if (Number.isFinite(runId) && runId > 0) {
+                    runIds.add(runId);
+                    if (jobId && Number.isFinite(jobId) && jobId > 0) {
+                      jobIds.set(details, { runId, jobId });
+                    } else {
+                      jobIds.set(details, { runId, jobId: null });
+                    }
+                  }
+                }
+              }
+
+              for (const runId of runIds) {
+                try {
+                  const jobsResp = await octokit.rest.actions.listJobsForWorkflowRun({
+                    owner: repo.owner,
+                    repo: repo.repo,
+                    run_id: runId,
+                    per_page: 100,
+                  });
+                  const jobs = Array.isArray(jobsResp?.data?.jobs) ? jobsResp.data.jobs : [];
+                  parsedJobs.set(runId, jobs);
+                } catch {
+                  parsedJobs.set(runId, []);
+                }
+              }
+            }
+
+            checkRunsOut = checkRuns.map((run) => {
+              const detailsUrl = typeof run.details_url === 'string' ? run.details_url : undefined;
+              let job = undefined;
+              if (includeCheckDetails && detailsUrl) {
+                const match = detailsUrl.match(/\/actions\/runs\/(\d+)(?:\/job\/(\d+))?/);
+                const runId = match ? Number(match[1]) : null;
+                const jobId = match && match[2] ? Number(match[2]) : null;
+                if (runId && Number.isFinite(runId)) {
+                  const jobs = parsedJobs.get(runId) || [];
+                  const matched = jobId
+                    ? jobs.find((j) => j.id === jobId)
+                    : null;
+                  const picked = matched || jobs.find((j) => j.name === run.name) || null;
+                  if (picked) {
+                    job = {
+                      runId,
+                      jobId: picked.id,
+                      url: picked.html_url,
+                      name: picked.name,
+                      conclusion: picked.conclusion,
+                      steps: Array.isArray(picked.steps)
+                        ? picked.steps.map((s) => ({
+                            name: s.name,
+                            status: s.status,
+                            conclusion: s.conclusion,
+                            number: s.number,
+                          }))
+                        : undefined,
+                    };
+                  } else {
+                    job = { runId, ...(jobId ? { jobId } : {}), url: detailsUrl };
+                  }
+                }
+              }
+
+              return {
+                id: run.id,
+                name: run.name,
+                app: run.app
+                  ? {
+                      name: run.app.name || undefined,
+                      slug: run.app.slug || undefined,
+                    }
+                  : undefined,
+                status: run.status,
+                conclusion: run.conclusion,
+                detailsUrl,
+                output: run.output
+                  ? {
+                      title: run.output.title || undefined,
+                      summary: run.output.summary || undefined,
+                      text: run.output.text || undefined,
+                    }
+                  : undefined,
+                ...(job ? { job } : {}),
+              };
+            });
+            const counts = { success: 0, failure: 0, pending: 0 };
+            for (const run of checkRuns) {
+              const status = run?.status;
+              const conclusion = run?.conclusion;
+              if (status === 'queued' || status === 'in_progress') {
+                counts.pending += 1;
+                continue;
+              }
+              if (!conclusion) {
+                counts.pending += 1;
+                continue;
+              }
+              if (conclusion === 'success' || conclusion === 'neutral' || conclusion === 'skipped') {
+                counts.success += 1;
+              } else {
+                counts.failure += 1;
+              }
+            }
+            const total = counts.success + counts.failure + counts.pending;
+            const state = counts.failure > 0 ? 'failure' : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
+            checks = { state, total, ...counts };
+          }
+        } catch {
+          // ignore and fall back
+        }
+        if (!checks) {
+          try {
+            const combined = await octokit.rest.repos.getCombinedStatusForRef({ owner: repo.owner, repo: repo.repo, ref: sha });
+            const statuses = Array.isArray(combined?.data?.statuses) ? combined.data.statuses : [];
+            const counts = { success: 0, failure: 0, pending: 0 };
+            statuses.forEach((s) => {
+              if (s.state === 'success') counts.success += 1;
+              else if (s.state === 'failure' || s.state === 'error') counts.failure += 1;
+              else if (s.state === 'pending') counts.pending += 1;
+            });
+            const total = counts.success + counts.failure + counts.pending;
+            const state = counts.failure > 0 ? 'failure' : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
+            checks = { state, total, ...counts };
+          } catch {
+            checks = null;
+          }
+        }
+      }
+
+      let diff = undefined;
+      if (includeDiff) {
+        const diffResp = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+          owner: repo.owner,
+          repo: repo.repo,
+          pull_number: number,
+          headers: { accept: 'application/vnd.github.v3.diff' },
+        });
+        diff = typeof diffResp?.data === 'string' ? diffResp.data : undefined;
+      }
+
+      return res.json({
+        connected: true,
+        repo,
+        pr,
+        issueComments,
+        reviewComments,
+        files,
+        ...(diff ? { diff } : {}),
+        checks,
+        ...(Array.isArray(checkRunsOut) ? { checkRuns: checkRunsOut } : {}),
+      });
+    } catch (error) {
+      if (error?.status === 401) {
+        const { clearGitHubAuth } = await getGitHubLibraries();
+        clearGitHubAuth();
+        return res.json({ connected: false });
+      }
+      console.error('Failed to load GitHub PR context:', error);
+      return res.status(500).json({ error: error.message || 'Failed to load GitHub PR context' });
     }
   });
 
@@ -5183,6 +5963,7 @@ async function main(options = {}) {
   });
 
   app.post('/api/git/ignore-openchamber', async (req, res) => {
+    // LEGACY_WORKTREES: only needed for <project>/.openchamber era. Safe to remove after legacy support dropped.
     const { ensureOpenChamberIgnored } = await getGitLibraries();
     try {
       const directory = req.query.directory;
@@ -5746,9 +6527,16 @@ async function main(options = {}) {
       ? req.query.path.trim()
       : os.homedir();
     const respectGitignore = req.query.respectGitignore === 'true';
+    let resolvedPath = '';
+
+    const isPlansDirectory = (value) => {
+      if (!value || typeof value !== 'string') return false;
+      const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+      return normalized.endsWith('/.opencode/plans') || normalized.endsWith('.opencode/plans');
+    };
 
     try {
-      const resolvedPath = path.resolve(normalizeDirectoryPath(rawPath));
+      resolvedPath = path.resolve(normalizeDirectoryPath(rawPath));
 
       const stats = await fsPromises.stat(resolvedPath);
       if (!stats.isDirectory()) {
@@ -5829,16 +6617,21 @@ async function main(options = {}) {
         entries: entries.filter(Boolean)
       });
     } catch (error) {
-      console.error('Failed to list directory:', error);
       const err = error;
-      if (err && typeof err === 'object' && 'code' in err) {
-        const code = err.code;
-        if (code === 'ENOENT') {
-          return res.status(404).json({ error: 'Directory not found' });
+      const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+      const isPlansPath = code === 'ENOENT' && (isPlansDirectory(resolvedPath) || isPlansDirectory(rawPath));
+      if (!isPlansPath) {
+        console.error('Failed to list directory:', error);
+      }
+      if (code === 'ENOENT') {
+        // Return empty result for plans directory (expected to not exist until first use)
+        if (isPlansPath) {
+          return res.json({ path: resolvedPath || rawPath, entries: [] });
         }
-        if (code === 'EACCES') {
-          return res.status(403).json({ error: 'Access to directory denied' });
-        }
+        return res.status(404).json({ error: 'Directory not found' });
+      }
+      if (code === 'EACCES') {
+        return res.status(403).json({ error: 'Access to directory denied' });
       }
       res.status(500).json({ error: (error && error.message) || 'Failed to list directory' });
     }

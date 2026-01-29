@@ -145,14 +145,16 @@ Implemented code pointers
 
 ## Feature B: Start Session From GitHub Issue
 
+Status: implemented.
+
 ### Intent
 Create a new session seeded with issue context, without polluting chat with large issue bodies/comments.
 
 ### Entry Point
-Session kebab menu in `packages/ui/src/components/session/SessionSidebar.tsx`.
+Project header menu in `packages/ui/src/components/session/SessionSidebar.tsx`.
 
 Add new item:
-- “New session from GitHub issue…”
+- “New session from GitHub issue”
 
 ### Modal UI
 Issue picker modal:
@@ -162,6 +164,10 @@ Issue picker modal:
   - full URL
   - `#123` or `123`
 - checkbox: “Create in worktree”
+
+Implementation notes:
+- modal layout matches Timeline dialog styling/patterns
+- “Open Repo” + per-issue “Open in GitHub” use `<a href=... target="_blank">` (desktop webview safe)
 
 ### Worktree option
 If enabled:
@@ -177,7 +183,7 @@ If disabled:
 ### Session Bootstrap (message)
 Send a single user message with:
 1) Visible text part: concise prompt, e.g.
-   - “Review the issue, clarify requirements, propose plan, then implement.”
+   - “Review the issue; summarize requirements + unknowns; ask clarifying questions; gather needed code context; propose plan + next actions; do not implement until user confirms.”
 2) Hidden synthetic parts: issue payload
    - issue title/body
    - labels, assignees, author
@@ -192,16 +198,34 @@ Do not invent a new hidden-context mechanism.
 - Get issue by number
 - List issue comments
 
+Implemented code pointers
+- UI modal: `packages/ui/src/components/session/GitHubIssuePickerDialog.tsx`
+- Shared sendMessage synthetic parts: `packages/ui/src/lib/opencode/client.ts`
+- Web server endpoints:
+  - `GET /api/github/issues/list`
+  - `GET /api/github/issues/get`
+  - `GET /api/github/issues/comments`
+- Desktop Tauri commands:
+  - `github_issues_list`
+  - `github_issue_get`
+  - `github_issue_comments`
+- VS Code bridge handlers:
+  - `api:github/issues:list`
+  - `api:github/issues:get`
+  - `api:github/issues:comments`
+
 ## Feature C: Start Session From GitHub PR (with worktree checkout)
+
+Status: implemented.
 
 ### Intent
 Create a session seeded with PR context, with optional worktree checkout of PR branch (including forks).
 
 ### Entry Point
-Session kebab menu in `packages/ui/src/components/session/SessionSidebar.tsx`.
+Project header menu in `packages/ui/src/components/session/SessionSidebar.tsx`.
 
 Add new item:
-- “New session from GitHub PR…”
+- “New session from GitHub PR”
 
 ### Modal UI
 PR picker modal:
@@ -212,20 +236,24 @@ PR picker modal:
   - `#123` or `123`
 - checkbox: “Create session in PR worktree”
 
+Implementation notes:
+- modal layout matches Timeline dialog styling/patterns
+- list pagination: “Load more” (page-based, `per_page=50`)
+- optional toggle: include full diff in hidden context
+
 ### Worktree behavior
 If enabled:
 - if PR is from same repo:
-  - fetch head branch
-  - create worktree from that branch (reuse `createWorktreeSessionForBranch`)
+  - fetch PR head into `FETCH_HEAD`
+  - create worktree using the PR branch name, starting at `FETCH_HEAD` (does not change main worktree)
 - if PR is from fork:
-  - add temporary remote (derived from PR head repo clone URL)
-  - fetch `<head.ref>`
-  - create worktree
+  - fetch PR head from fork clone URL into `FETCH_HEAD`
+  - create worktree using the PR branch name, starting at `FETCH_HEAD`
 
 Fallbacks:
 - if fetch/remote fails or permission denied:
   - still create a normal session with PR context
-  - show toast with “Open in GitHub” action
+  - show toast with error; user can open PR in GitHub
 
 ### Session Bootstrap (message)
 Same synthetic-parts approach as Issues.
@@ -238,10 +266,53 @@ Hidden parts should include:
 - checks/status summary
 
 Visible prompt text should instruct:
-- review PR intent
-- identify risks
-- propose changes
-- optionally implement changes in checked-out branch/worktree
+- review PR intent; call out intent/implementation mismatch
+- identify risks + missing pieces
+- gather needed repo context; no speculation; ask for missing info
+- propose a plan + next actions; do not implement until user confirms
+
+Implemented code pointers
+- UI modal: `packages/ui/src/components/session/GitHubPullRequestPickerDialog.tsx`
+- Web server endpoints:
+  - `GET /api/github/pulls/list`
+  - `GET /api/github/pulls/context`
+- Desktop Tauri commands:
+  - `github_prs_list`
+  - `github_pr_context`
+- VS Code bridge handlers:
+  - `api:github/pulls:list`
+  - `api:github/pulls:context`
+
+## Feature E: PR Context Helpers (Checks/Comments -> Chat)
+
+Status: implemented.
+
+Intent
+Reduce PR iteration loop time by letting the user add targeted PR signal (failed checks, review feedback) into the next chat message without polluting visible chat.
+
+Placement
+Inside the existing Git tab PR panel (`packages/ui/src/components/views/git/PullRequestSection.tsx`).
+
+UI
+- “Send failed checks to chat” (only if failures exist)
+- “Send PR comments to chat” (issue comments + review comments)
+- “Check details” dialog (shows check runs, app name, and GitHub Actions job steps when available)
+- “Refresh checks” affordance
+
+Behavior
+- On click, sends a new user message in the current session (and switches to Chat tab).
+- Message contains a short visible prompt plus hidden synthetic parts.
+- Failed checks payload should include: check name, status/conclusion, details URL, and any available summary/text.
+- When available, include GitHub Actions job + step breakdown and the check app name.
+- Comments payload should include: author, body, file/path + line when available, and comment URL.
+- Keep visible user prompt short; include only human intent.
+
+Implementation notes
+- Reuse Feature C PR context endpoint (`/api/github/pulls/context`) as the single source for comments/files/checks/diff.
+- Prefer a compact checks rollup (passed/total) with optional expand into failing checks.
+
+Implemented code pointers
+- UI: `packages/ui/src/components/views/git/PullRequestSection.tsx`
 
 ### Required GitHub API Calls
 - List PRs

@@ -1,3 +1,37 @@
+## [1.6.0] - 2026-01-29
+
+- Added message stall detection with automatic soft resync for more reliable message delivery.
+- Fixed "Load older" button in long sessions with proper progressive pagination.
+- Session activity status now updates reliably even when the extension panel is hidden or collapsed.
+
+
+## [1.5.9] - 2026-01-28
+
+- Agent Manager: migrated to Opencode SDK worktree implementation; sessions in worktrees are now completely isolated.
+- Agent Manager: worktree setup commands are now persistant per project and automatically saved/restored.
+
+
+## [1.5.8] - 2026-01-26
+
+- Plans: added new Plan/Build mode switching support.
+- Chat: linkable mentions, better wrapping, and markdown/scroll polish in messages.
+- Skills: ClawdHub catalog now pages results and retries transient failures.
+- Diff: fixed Chrome scrolling in All Files layout.
+- Activity: added a text-justification setting for activity summaries (thanks to @iyangdianfeng).
+- Performance: faster chat rendering for busy sessions.
+- Reliability: file lists and message sends handle missing directories and transient errors more gracefully.
+
+
+## [1.5.7] - 2026-01-24
+
+- No notable changes
+
+
+## [1.5.6] - 2026-01-24
+
+- GitHub: added backend support for PRs/issues workflows; UI comes later.
+
+
 ## [1.5.5] - 2026-01-23
 
 - Settings: agent and command overrides now prefer plural directories while still honoring legacy singular folders.
