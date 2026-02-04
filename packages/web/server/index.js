@@ -4454,6 +4454,48 @@ async function main(options = {}) {
         accounts,
       });
     } catch (error) {
+      console.error('Failed to activate GitHub account:', error);
+      return res.status(500).json({ error: error.message || 'Failed to activate GitHub account' });
+    }
+  });
+
+  app.post('/api/github/auth/token', async (req, res) => {
+    try {
+      const { setGitHubAuth, getGitHubAuthAccounts, Octokit } = await getGitHubLibraries();
+      const { token } = req.body;
+      if (!token) {
+        return res.status(400).json({ error: 'Personal Access Token is required' });
+      }
+
+      const octokit = new Octokit({ auth: token });
+      const user = await getGitHubUserSummary(octokit);
+      
+      // Get scopes from headers
+      const response = await octokit.rest.users.getAuthenticated();
+      const scope = response.headers['x-oauth-scopes'] || '';
+
+      setGitHubAuth({
+        accessToken: token,
+        scope,
+        tokenType: 'bearer',
+        user,
+      });
+
+      return res.json({
+        connected: true,
+        user,
+        scope,
+        accounts: getGitHubAuthAccounts(),
+      });
+    } catch (error) {
+      console.error('Failed to connect GitHub with token:', error);
+      if (error?.status === 401) {
+        return res.status(401).json({ error: 'Invalid Personal Access Token' });
+      }
+      return res.status(500).json({ error: error.message || 'Failed to connect GitHub with token' });
+    }
+  });
+    } catch (error) {
       console.error('Failed to get GitHub auth status:', error);
       return res.status(500).json({ error: error.message || 'Failed to get GitHub auth status' });
     }

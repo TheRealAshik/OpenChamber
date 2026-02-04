@@ -4,7 +4,21 @@ import { toast } from 'sonner';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import type { GitHubAuthStatus } from '@/lib/api/types';
-import { RiGithubFill } from '@remixicon/react';
+import { RiGithubFill, RiKeyLine, RiLoginCircleLine, RiInformationLine } from '@remixicon/react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 
 type GitHubUser = {
   login: string;
@@ -64,6 +78,9 @@ export const GitHubSettings: React.FC = () => {
   const [flow, setFlow] = React.useState<DeviceFlowStartResponse | null>(null);
   const [pollIntervalMs, setPollIntervalMs] = React.useState<number | null>(null);
   const pollTimerRef = React.useRef<number | null>(null);
+
+  const [isPatDialogOpen, setIsPatDialogOpen] = React.useState(false);
+  const [patToken, setPatToken] = React.useState('');
 
   const stopPolling = React.useCallback(() => {
     if (pollTimerRef.current != null) {
@@ -244,6 +261,40 @@ export const GitHubSettings: React.FC = () => {
     }
   }, [runtimeGitHub, setStatus]);
 
+  const handlePatLogin = React.useCallback(async () => {
+    if (!patToken.trim()) return;
+    setIsBusy(true);
+    try {
+      const payload = runtimeGitHub
+        ? await runtimeGitHub.authWithToken(patToken.trim())
+        : await (async () => {
+            const response = await fetch('/api/github/auth/token', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+              body: JSON.stringify({ token: patToken.trim() }),
+            });
+            const body = (await response.json().catch(() => null)) as GitHubAuthStatus | { error?: string } | null;
+            if (!response.ok || !body) {
+              throw new Error((body as { error?: string } | null)?.error || response.statusText);
+            }
+            return body as GitHubAuthStatus;
+          })();
+
+      setStatus(payload);
+      toast.success('GitHub connected via PAT');
+      setIsPatDialogOpen(false);
+      setPatToken('');
+    } catch (error) {
+      console.error('Failed to connect with PAT:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to connect with PAT');
+    } finally {
+      setIsBusy(false);
+    }
+  }, [patToken, runtimeGitHub, setStatus]);
+
   if (isLoading) {
     return null;
   }
@@ -300,19 +351,93 @@ export const GitHubSettings: React.FC = () => {
       ) : (
         <div className="flex items-center justify-between gap-3 rounded-lg border bg-background/50 px-3 py-2">
           <div className="typography-ui-label text-foreground">Not connected</div>
-          <Button onClick={startConnect} disabled={isBusy}>
-            Connect
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button disabled={isBusy}>
+                Connect
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={startConnect}>
+                <RiLoginCircleLine className="mr-2 h-4 w-4" />
+                Login using GitHub Auth Flow
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setIsPatDialogOpen(true)}>
+                <RiKeyLine className="mr-2 h-4 w-4" />
+                Login using Personal Access Token (PAT)
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       )}
 
       {connected ? (
         <div className="flex justify-end">
-          <Button variant="ghost" onClick={startConnect} disabled={isBusy}>
-            Add account
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" disabled={isBusy}>
+                Add account
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={startConnect}>
+                <RiLoginCircleLine className="mr-2 h-4 w-4" />
+                Login using GitHub Auth Flow
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setIsPatDialogOpen(true)}>
+                <RiKeyLine className="mr-2 h-4 w-4" />
+                Login using Personal Access Token (PAT)
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       ) : null}
+
+      <Dialog open={isPatDialogOpen} onOpenChange={setIsPatDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Connect with Personal Access Token</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 typography-ui-label text-foreground">
+                <RiKeyLine className="h-4 w-4" />
+                GitHub PAT
+              </div>
+              <Input
+                type="password"
+                placeholder="ghp_xxxxxxxxxxxx"
+                value={patToken}
+                onChange={(e) => setPatToken(e.target.value)}
+                autoFocus
+              />
+              <div className="flex items-start gap-2 rounded-md bg-muted/50 p-2 typography-meta text-muted-foreground">
+                <RiInformationLine className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <div>
+                  Required scopes: <code className="text-foreground/80">repo</code>, <code className="text-foreground/80">read:org</code>, <code className="text-foreground/80">workflow</code>, <code className="text-foreground/80">read:user</code>, <code className="text-foreground/80">user:email</code>.
+                  <br />
+                  <a
+                    href="https://github.com/settings/tokens/new?scopes=repo,read:org,workflow,read:user,user:email&description=OpenChamber"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-1 inline-block text-primary hover:underline"
+                  >
+                    Generate a token on GitHub &rarr;
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setIsPatDialogOpen(false)} disabled={isBusy}>
+              Cancel
+            </Button>
+            <Button onClick={handlePatLogin} disabled={!patToken.trim() || isBusy}>
+              {isBusy ? 'Connecting...' : 'Connect Account'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {accounts.length > 1 ? (
         <div className="space-y-2 rounded-lg border bg-background/50 p-3">

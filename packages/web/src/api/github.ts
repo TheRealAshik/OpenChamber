@@ -58,6 +58,19 @@ export const createWebGitHubAPI = (): GitHubAPI => ({
     return payload;
   },
 
+  async authWithToken(token: string): Promise<GitHubAuthStatus> {
+    const response = await fetch('/api/github/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    const payload = await jsonOrNull<GitHubAuthStatus & { error?: string }>(response);
+    if (!response.ok || !payload) {
+      throw new Error(payload?.error || response.statusText || 'Failed to connect with token');
+    }
+    return payload;
+  },
+
   async authDisconnect(): Promise<{ removed: boolean }> {
     const response = await fetch('/api/github/auth', { method: 'DELETE', headers: { Accept: 'application/json' } });
     const payload = await jsonOrNull<{ removed?: boolean; error?: string }>(response);

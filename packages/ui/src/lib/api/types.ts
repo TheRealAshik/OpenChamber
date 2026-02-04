@@ -735,6 +735,7 @@ export interface GitHubAPI {
   authStatus(): Promise<GitHubAuthStatus>;
   authStart(): Promise<GitHubDeviceFlowStart>;
   authComplete(deviceCode: string): Promise<GitHubDeviceFlowComplete>;
+  authWithToken(token: string): Promise<GitHubAuthStatus>;
   authDisconnect(): Promise<{ removed: boolean }>;
   authActivate(accountId: string): Promise<GitHubAuthStatus>;
   me?(): Promise<GitHubUserSummary>;
